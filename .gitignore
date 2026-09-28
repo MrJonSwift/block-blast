@@ -6,3 +6,5 @@ Thumbs.db
 .serve.err
 shot-*.png
 _probe*.png
+.chrome-profile/
+_site/
