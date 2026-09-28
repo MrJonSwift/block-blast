@@ -21,6 +21,7 @@
     <pre id="report">running</pre>
     <script type="module">
       import { SHAPES, fitsAt } from '/js/game.js';
+      import { LIFT_CELLS, ghostOffset } from '/js/input.js';
 
       // The app is driven inside a fixed-size iframe so the layout is measured
       // at a real phone viewport (headless Chrome clamps its own window to a
@@ -160,33 +161,82 @@
       };
 
       /**
-       * Drags tray slot `slot` so the piece's origin lands exactly on (cx, cy).
-       * Mirrors the app's own maths: it centres the piece box on the finger and
-       * snaps the origin to round((left - boardLeft - gap) / pitch), so aiming
-       * at cells[0].left + cx*pitch + pieceWidth/2 makes the snap exact.
+       * Everything needed to aim a piece at an origin: the piece's own size in
+       * board cells, the board geometry, and the offset the app will hold the
+       * piece at. The offset comes from the app's own helper rather than being
+       * re-derived here, so the two cannot drift apart.
        */
-      const dragTo = async (slot, cx, cy) => {
-        const slotNode = app.doc.querySelectorAll('.slot')[slot];
-        if (!slotNode || !slotNode.querySelector('.piece')) return { ok: false, why: 'empty slot' };
+      const aimGeometry = (slotNode) => {
         const cellNodes = app.doc.querySelectorAll('#board .cell');
         const cell0 = cellNodes[0].getBoundingClientRect();
         const cell1 = cellNodes[1].getBoundingClientRect();
         const slotRect = slotNode.getBoundingClientRect();
+        const boardRect = app.doc.getElementById('board').getBoundingClientRect();
+        const trayRect = app.doc.getElementById('tray').getBoundingClientRect();
 
         const block = cell0.width;
         const pitch = cell1.left - cell0.left;
         const gap = pitch - block;
+        const axis = trayRect.top >= boardRect.bottom - 1 ? 'y' : 'x';
 
-        const pieceStyle = app.win.getComputedStyle(slotNode.querySelector('.piece'));
-        const cellsX = pieceStyle.gridTemplateColumns.split(' ').length;
-        const cellsY = pieceStyle.gridTemplateRows.split(' ').length;
-        const pieceW = cellsX * block + (cellsX - 1) * gap;
-        const pieceH = cellsY * block + (cellsY - 1) * gap;
+        // The app sizes the drag piece from the shape table, so take the box
+        // from there too. The tray's inline template is a repeat(), so its
+        // column count cannot be read by counting words in the string.
+        const save = app.win.localStorage.getItem('blockblast.save.v1');
+        const saved = save ? JSON.parse(save).tray[Number(slotNode.dataset.slot)] : null;
+        const shape = saved ? SHAPES[saved.shapeId] : null;
+        const cellsX = shape ? shape.width : 0;
+        const cellsY = shape ? shape.height : 0;
 
-        const toX = cell0.left + cx * pitch + pieceW / 2;
-        const toY = cell0.top + cy * pitch + pieceH / 2;
-        const fromX = slotRect.left + slotRect.width / 2;
-        const fromY = slotRect.top + slotRect.height / 2;
+        return {
+          cell0,
+          cell1,
+          slotRect,
+          block,
+          pitch,
+          gap,
+          axis,
+          cellsX,
+          cellsY,
+          viewWidth: app.win.innerWidth,
+          viewHeight: app.win.innerHeight,
+          pieceW: cellsX * block + (cellsX - 1) * gap,
+          pieceH: cellsY * block + (cellsY - 1) * gap,
+          offset: ghostOffset({
+            axis,
+            pitch,
+            block,
+            cell0Left: cell0.left,
+            cell0Top: cell0.top,
+            viewWidth: app.win.innerWidth,
+            viewHeight: app.win.innerHeight,
+          }),
+        };
+      };
+
+      /**
+       * The finger position that puts the piece's origin on (cx, cy). The app
+       * draws the piece at finger - half the piece - offset, so the finger
+       * itself has to go *against* the offset to land the piece on the cell.
+       */
+      const aimAt = (geom, cx, cy) => ({
+        toX: geom.cell0.left + cx * geom.pitch + geom.pieceW / 2 - geom.offset.dx,
+        toY: geom.cell0.top + cy * geom.pitch + geom.pieceH / 2 - geom.offset.dy,
+      });
+
+      /**
+       * Drags tray slot `slot` so the piece's origin lands exactly on (cx, cy).
+       * The app centres the piece box on the finger, holds it clear by
+       * ghostOffset, and snaps the origin to round((left - cell0) / pitch), so
+       * aiming at cells[0].left + cx*pitch + pieceWidth/2 + dx is exact.
+       */
+      const dragTo = async (slot, cx, cy) => {
+        const slotNode = app.doc.querySelectorAll('.slot')[slot];
+        if (!slotNode || !slotNode.querySelector('.piece')) return { ok: false, why: 'empty slot' };
+        const geom = aimGeometry(slotNode);
+        const { toX, toY } = aimAt(geom, cx, cy);
+        const fromX = geom.slotRect.left + geom.slotRect.width / 2;
+        const fromY = geom.slotRect.top + geom.slotRect.height / 2;
 
         pointer(slotNode, 'pointerdown', fromX, fromY);
         for (let i = 1; i <= 5; i++) {
@@ -194,7 +244,6 @@
         }
         const ghost = app.doc.querySelector('.drag');
         const firstGhostCell = app.doc.querySelector('.ghost-cell');
-        const ghostStyle = app.win.getComputedStyle(slotNode.querySelector('.piece'));
         const diag = {
           ghost: Boolean(ghost),
           ghostLeft: ghost ? ghost.style.transform : '',
@@ -207,18 +256,33 @@
           lineHints: app.doc.querySelectorAll('.line-hint').length,
           toX: toX.toFixed(2),
           toY: toY.toFixed(2),
-          cell0Left: cell0.left.toFixed(2),
-          pitch: pitch.toFixed(2),
-          block: block.toFixed(2),
-          gap: gap.toFixed(2),
-          pieceW: pieceW.toFixed(2),
-          pieceH: pieceH.toFixed(2),
-          offsetPitch: (cellNodes[1].offsetLeft - cellNodes[0].offsetLeft).toFixed(2),
-          offsetBlock: cellNodes[0].offsetWidth,
+          axis: geom.axis,
+          offset: `${geom.offset.dx},${geom.offset.dy}`,
+          cell0Left: geom.cell0.left.toFixed(2),
+          pitch: geom.pitch.toFixed(2),
+          block: geom.block.toFixed(2),
+          gap: geom.gap.toFixed(2),
+          pieceW: geom.pieceW.toFixed(2),
+          pieceH: geom.pieceH.toFixed(2),
         };
         pointer(app.win, 'pointerup', toX, toY);
         await sleep(450);
-        return { ok: true, cellsX, cellsY, diag };
+        return { ok: true, cellsX: geom.cellsX, cellsY: geom.cellsY, diag };
+      };
+
+      /**
+       * Checks a sweep of peeks against the origin the app aimed for. The
+       * origin is read back from the rendered preview, so it can only be read
+       * from a valid one: an invalid preview drops the cells that fall off the
+       * board, and its bounding box then starts somewhere else entirely.
+       */
+      const sweepOk = (entries) => {
+        const valid = entries.filter((e) => /^\d+,\d+$/.test(String(e.origin)));
+        const mismatched = valid.filter((e) => {
+          const [x, y] = String(e.origin).split(',').map(Number);
+          return x !== e.aimedX || y !== e.aimedY;
+        });
+        return { ok: valid.length >= 4 && mismatched.length === 0, valid: valid.length, mismatched };
       };
 
       const layoutChecks = () => {
@@ -276,22 +340,10 @@
       const peek = async (slot, cx, cy) => {
         const slotNode = app.doc.querySelectorAll('.slot')[slot];
         if (!slotNode || !slotNode.querySelector('.piece')) return 'empty-slot';
-        const cellNodes = app.doc.querySelectorAll('#board .cell');
-        const cell0 = cellNodes[0].getBoundingClientRect();
-        const cell1 = cellNodes[1].getBoundingClientRect();
-        const slotRect = slotNode.getBoundingClientRect();
-        const block = cell0.width;
-        const pitch = cell1.left - cell0.left;
-        const gap = pitch - block;
-        const style = app.win.getComputedStyle(slotNode.querySelector('.piece'));
-        const cellsX = style.gridTemplateColumns.split(' ').length;
-        const cellsY = style.gridTemplateRows.split(' ').length;
-        const pieceW = cellsX * block + (cellsX - 1) * gap;
-        const pieceH = cellsY * block + (cellsY - 1) * gap;
-        const toX = cell0.left + cx * pitch + pieceW / 2;
-        const toY = cell0.top + cy * pitch + pieceH / 2;
-        const fromX = slotRect.left + slotRect.width / 2;
-        const fromY = slotRect.top + slotRect.height / 2;
+        const geom = aimGeometry(slotNode);
+        const { toX, toY } = aimAt(geom, cx, cy);
+        const fromX = geom.slotRect.left + geom.slotRect.width / 2;
+        const fromY = geom.slotRect.top + geom.slotRect.height / 2;
 
         pointer(slotNode, 'pointerdown', fromX, fromY);
         pointer(app.win, 'pointermove', toX, toY);
@@ -306,10 +358,22 @@
           const invalid = ghostCells.every((c) => c.classList.contains('invalid'));
           result = `${invalid ? 'invalid@' : ''}${Math.min(...cols)},${Math.min(...rows)}`;
         }
+        const rect = ghost ? ghost.getBoundingClientRect() : null;
         const out = {
           origin: result,
           appLeft: match ? Number(match[1]) : null,
           appTop: match ? Number(match[2]) : null,
+          // The finger the app was last told about, so the check can measure
+          // how far the piece is actually held off it.
+          finger: { x: toX, y: toY },
+          piece: rect
+            ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, w: rect.width, h: rect.height }
+            : null,
+          axis: geom.axis,
+          offset: geom.offset,
+          pitch: geom.pitch,
+          viewWidth: app.win.innerWidth,
+          viewHeight: app.win.innerHeight,
         };
         pointer(app.win, 'pointercancel', toX, toY);
         await sleep(60);
@@ -372,22 +436,72 @@
             `cell0=(${cellRects0[0].left.toFixed(2)},${cellRects0[0].top.toFixed(2)}) w=${cellRects0[0].width.toFixed(2)} ` +
             `cell1.left=${cellRects0[1].left.toFixed(2)}`
         );
-        const sweep = [];
+        const cols = [];
         for (let x = 0; x < 8; x++) {
-          const r = await peek(0, x, 0);
-          sweep.push(`${x}->${r.origin}/L${r.appLeft}`);
+          cols.push({ aimedX: x, aimedY: 0, ...(await peek(0, x, 0)) });
         }
-        log(`  sweep: ${sweep.join('  ')}`);
-        // The X origin must always match the aim. The Y origin can only be read
-        // from a valid preview, because an invalid one drops out-of-bounds
-        // cells and its rendered bounding box no longer starts at the origin.
-        const sweepOk = sweep.every((entry) => {
-          const m = /^(\d+)->(invalid@)?(\d+),(\d+)\//.exec(entry);
-          if (!m) return false;
-          if (Number(m[1]) !== Number(m[3])) return false;
-          return m[2] ? true : m[4] === '0';
-        });
-        check('snap maps every column to the aimed column', sweepOk, sweep.join(' '));
+        log(`  sweep: ${cols.map((c) => `${c.aimedX}->${c.origin}`).join('  ')}`);
+        const colSweep = sweepOk(cols);
+        check(
+          'snap maps every column to the aimed column',
+          colSweep.ok,
+          `${colSweep.valid}/8 valid, ${cols.map((c) => `${c.aimedX}->${c.origin}`).join(' ')}`
+        );
+
+        // The same sweep down the rows: the hold moves the Y mapping, so the
+        // columns alone would not catch it being applied to the wrong axis.
+        const rows = [];
+        for (let y = 0; y < 8; y++) {
+          rows.push({ aimedX: 0, aimedY: y, ...(await peek(0, 0, y)) });
+        }
+        log(`  rows: ${rows.map((r) => `${r.aimedY}->${r.origin}`).join('  ')}`);
+        const rowSweep = sweepOk(rows);
+        check(
+          'snap maps every row to the aimed row',
+          rowSweep.ok,
+          `${rowSweep.valid}/8 valid, ${rows.map((r) => `${r.aimedY}->${r.origin}`).join(' ')}`
+        );
+
+        // A finger covers whatever is under it, so the piece is held clear of it
+        // on one axis only: 2 cells up when the tray is below the board, 2
+        // cells left when it is beside it.
+        const lift = rows[rows.length - 1];
+        const heldX = lift.piece.x - lift.finger.x;
+        const heldY = lift.piece.y - lift.finger.y;
+        log(
+          `  lift: axis=${lift.axis} 2cells=${(LIFT_CELLS * lift.pitch).toFixed(2)} ` +
+            `applied=${lift.offset.dx},${lift.offset.dy} held=${heldX.toFixed(2)},${heldY.toFixed(2)} ` +
+            `pitch=${lift.pitch.toFixed(2)}`
+        );
+        check(
+          'the piece is drawn where the app says to hold it',
+          Math.abs(heldX - lift.offset.dx) < 0.75 && Math.abs(heldY - lift.offset.dy) < 0.75,
+          `axis=${lift.axis} held=${heldX.toFixed(2)},${heldY.toFixed(2)} want=${lift.offset.dx},${lift.offset.dy}`
+        );
+        check(
+          'the lift is real, and points away from the tray',
+          lift.axis === 'x'
+            ? lift.offset.dx < 0 && lift.offset.dy === 0
+            : lift.offset.dy < 0 && lift.offset.dx === 0,
+          `axis=${lift.axis} offset=${lift.offset.dx},${lift.offset.dy}`
+        );
+
+        // The hold pushes the finger past the board, so the deepest legal
+        // placement must still need a finger that is on screen.
+        const geom0 = aimGeometry(app.doc.querySelectorAll('.slot')[0]);
+        const deepestY =
+          geom0.cell0.top + (8 - geom0.cellsY) * geom0.pitch + geom0.pieceH / 2 - geom0.offset.dy;
+        const deepestX =
+          geom0.cell0.left + (8 - geom0.cellsX) * geom0.pitch + geom0.pieceW / 2 - geom0.offset.dx;
+        check(
+          'the deepest placement still needs an on-screen finger',
+          deepestY < app.win.innerHeight - 1 &&
+            deepestX < app.win.innerWidth - 1 &&
+            deepestY > 1 &&
+            deepestX > 1,
+          `y=${deepestY.toFixed(1)}/${app.win.innerHeight} x=${deepestX.toFixed(1)}/${app.win.innerWidth}`
+        );
+
         check('board unchanged by the sweep', app.blocks() === 0, `${app.blocks()}`);
         void firstCount2;
 

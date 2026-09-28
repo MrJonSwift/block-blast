@@ -1,4 +1,40 @@
-import { SHAPES, previewPlacement } from './game.js';
+import { GRID, SHAPES, previewPlacement } from './game.js';
+
+/** How far the dragged piece is held clear of the finger, in board cells. */
+export const LIFT_CELLS = 2;
+
+/** Kept clear at the far edge of the screen so the finger stays on it. */
+const EDGE = 6;
+
+/**
+ * How far off the finger the dragged piece is drawn, as a vector to add to the
+ * finger position. A finger covers the piece it is holding, so the piece is
+ * lifted clear of it; the snap origin is derived from the same position, so
+ * this is also what decides where the piece lands.
+ *
+ * The tray decides which way to move: it sits under the board in portrait and
+ * as a column beside it in phone landscape, so the piece is held up in one and
+ * out to the left in the other. That direction comes from the measured layout
+ * rather than a copy of the stylesheet's breakpoint, so it cannot fall out of
+ * step with the CSS. The space available on that side is the real constraint —
+ * the board usually fills the stage in landscape — so the 2 cells shrink to
+ * whatever is left, and the deepest legal piece always needs a finger that is
+ * still on screen.
+ *
+ * Pure, so tests/probe.html can aim with the same numbers the app places with.
+ */
+export function ghostOffset({ axis, pitch, block, cell0Left, cell0Top, viewWidth, viewHeight }) {
+  // gap + block === pitch, so the board's far edge is one whole pitch-count
+  // past the first cell. The piece that needs the most room is the one cell
+  // deep one in the last legal origin: it is aimed half a cell above the
+  // board's far edge, so that is the hold the screen has to leave for it.
+  const boardEdge = axis === 'x' ? cell0Left + GRID * pitch : cell0Top + GRID * pitch;
+  const viewEdge = axis === 'x' ? viewWidth : viewHeight;
+  const room = viewEdge - boardEdge + pitch - block / 2 - EDGE;
+  const offset = Math.max(0, Math.min(LIFT_CELLS * pitch, room));
+  const shift = offset > 0 ? -offset : 0;
+  return { dx: axis === 'x' ? shift : 0, dy: axis === 'y' ? shift : 0 };
+}
 
 export function createDragController({ renderer, getGame, isBusy, onPlace, onDragStateChange }) {
   const drag = {
@@ -60,8 +96,23 @@ export function createDragController({ renderer, getGame, isBusy, onPlace, onDra
     const pieceWidth = drag.shape.width * block + (drag.shape.width - 1) * gap;
     const pieceHeight = drag.shape.height * block + (drag.shape.height - 1) * gap;
 
-    const left = event.clientX - pieceWidth / 2;
-    const top = event.clientY - pieceHeight / 2;
+    // Every geometry read happens before the transform is written, so the drag
+    // never measures a box it has just moved.
+    const board = renderer.board.getBoundingClientRect();
+    const tray = renderer.tray.getBoundingClientRect();
+    const axis = tray.top >= board.bottom - 1 ? 'y' : 'x';
+    const { dx, dy } = ghostOffset({
+      axis,
+      pitch,
+      block,
+      cell0Left,
+      cell0Top,
+      viewWidth: window.innerWidth,
+      viewHeight: window.innerHeight,
+    });
+
+    const left = event.clientX - pieceWidth / 2 + dx;
+    const top = event.clientY - pieceHeight / 2 + dy;
     drag.node.style.transform = `translate3d(${Math.round(left)}px, ${Math.round(top)}px, 0)`;
 
     // Measured from the first cell rather than the board's padding box: the

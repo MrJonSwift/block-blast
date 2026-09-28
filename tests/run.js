@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { LIFT_CELLS, ghostOffset } from '../js/input.js';
 import {
   COLORS,
   GRID,
@@ -292,6 +293,61 @@ test('dealing is deterministic for a given seed', () => {
   assert.equal(a.draws, b.draws);
   const c = createPlayableGame(123457);
   assert.notDeepEqual(a.tray, c.tray);
+});
+
+test('the piece is held 2 cells clear of the finger when there is room', () => {
+  const geom = { axis: 'y', pitch: 45, block: 40, cell0Left: 20, cell0Top: 80, viewWidth: 390, viewHeight: 844 };
+  const { dx, dy } = ghostOffset(geom);
+  assert.equal(dx, 0, 'not moved sideways');
+  assert.equal(dy, -2 * geom.pitch, 'held 2 cells up, away from the tray below');
+  const sideways = ghostOffset({ ...geom, axis: 'x', viewWidth: 1024 });
+  assert.equal(sideways.dy, 0, 'not moved up');
+  assert.equal(sideways.dx, -2 * geom.pitch, 'held 2 cells left, away from the tray beside');
+});
+
+test('the hold shrinks when the board leaves no room below it', () => {
+  // The board's bottom edge is cell0Top + GRID*pitch, and the deepest finger is
+  // aimed half a cell above it, so a view that has less than half a cell of
+  // slack after that leaves no room for a hold at all.
+  const base = { axis: 'y', pitch: 45, block: 40, cell0Left: 20, cell0Top: 80, viewWidth: 390 };
+  const boardEdge = base.cell0Top + GRID * base.pitch;
+  const noRoom = { ...base, viewHeight: boardEdge - base.pitch + base.block / 2 };
+  const none = ghostOffset(noRoom);
+  assert.deepEqual([none.dx, none.dy], [0, 0], 'no room means no hold');
+  const aLittle = { ...base, viewHeight: noRoom.viewHeight + 30 };
+  const shrunk = ghostOffset(aLittle);
+  assert.ok(Math.abs(shrunk.dy) < 2 * aLittle.pitch, `expected less than 2 cells, got ${shrunk.dy}`);
+  assert.ok(Math.abs(shrunk.dy) > 0, 'the room that is there gets used');
+  const plenty = { ...base, viewHeight: 844 };
+  assert.equal(ghostOffset(plenty).dy, -2 * plenty.pitch, 'a roomy view gets the full 2 cells');
+});
+
+test('the deepest placement always needs a finger that is on screen', () => {
+  // Whatever the view, the finger needed to aim a one cell deep piece at the
+  // last legal origin must land inside it. This is the invariant the hold is
+  // clamped to preserve; without the clamp the bottom row would need a finger
+  // below the screen on a short viewport.
+  for (const viewWidth of [320, 390, 430, 768, 1024, 1180]) {
+    for (const viewHeight of [390, 568, 844, 932, 1024]) {
+      for (const axis of ['x', 'y']) {
+        const pitch = Math.min(viewWidth, viewHeight) / 8 - 2;
+        const cell0Left = 20;
+        const cell0Top = 20;
+        const { dx, dy } = ghostOffset({ axis, pitch, block: pitch - 4, cell0Left, cell0Top, viewWidth, viewHeight });
+        const half = (pitch - 4) / 2;
+        const fingerX = cell0Left + (GRID - 1) * pitch + half + dx;
+        const fingerY = cell0Top + (GRID - 1) * pitch + half + dy;
+        // On the held axis the limit is the screen; on the other the piece is
+        // centred on the finger, so the board's own far edge is the limit.
+        const limitX = axis === 'x' ? viewWidth : cell0Left + GRID * pitch;
+        const limitY = axis === 'y' ? viewHeight : cell0Top + GRID * pitch;
+        const where = `${viewWidth}x${viewHeight} ${axis}`;
+        assert.ok(fingerX <= limitX, `x ${fingerX.toFixed(1)} past ${limitX} at ${where}`);
+        assert.ok(fingerY <= limitY, `y ${fingerY.toFixed(1)} past ${limitY} at ${where}`);
+        assert.ok(fingerX > 0 && fingerY > 0, `finger off the top/left at ${where}`);
+      }
+    }
+  }
 });
 
 test('save round-trips exactly', () => {

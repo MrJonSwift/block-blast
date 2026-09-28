@@ -47,6 +47,14 @@ Two details worth knowing if you change this code:
 - **`measure()` never writes styles.** The board is sized from the space left
   over by the tray, so resizing tray pieces mid-drag used to reflow the board
   and shift the snap by a cell. `sizePieces()` is a separate step.
+- **The dragged piece is held clear of the finger**, two cells away from it, so
+  your hand does not cover the piece you are placing. The tray decides which
+  way: up in portrait, where the tray is below the board, and out to the left in
+  phone landscape, where the tray is a column beside it. The snap origin comes
+  from the same position, so where the piece is drawn is where it lands. When
+  the board leaves no room on that side, the hold shrinks to what is there.
+  `ghostOffset()` in `js/input.js` is pure, and the browser harness imports it
+  rather than repeating the maths.
 
 ## Development
 
