@@ -5,10 +5,13 @@ import {
   GRID,
   SHAPES,
   SHAPE_COUNT,
+  STAGE_COUNT,
+  STAGE_SHAPES,
   TRAY_SIZE,
   anyTrayPlacement,
   clearedLines,
   createPlayableGame,
+  dealTray,
   deserialize,
   fitsAt,
   hasAnyPlacement,
@@ -17,6 +20,8 @@ import {
   previewPlacement,
   scoreForPlacement,
   serialize,
+  stageFor,
+  stageNameFor,
 } from '../js/game.js';
 
 let passed = 0;
@@ -425,6 +430,89 @@ test('corrupt saves are rejected rather than crashing', () => {
     draws: 0,
   };
   assert.equal(deserialize(badCell), null);
+});
+
+test('the first pieces of a run are small, and the awkward ones come later', () => {
+  const opening = new Set();
+  const later = new Set();
+  // Sample every deal a game makes, bucketed by the stage that was live when it
+  // was drawn. A handful of seeds is enough to see every shape in a pool.
+  for (const seed of [1, 7, 42, 2026, 987654321, 13, 99, 12345, 555, 8]) {
+    const game = createPlayableGame(seed);
+    for (let moves = 0; moves < 200; moves++) {
+      const bucket = stageFor(moves) === 0 ? opening : later;
+      for (const piece of dealTray(game)) bucket.add(piece.shapeId);
+      game.moves += 1;
+    }
+  }
+  assert.ok(opening.size > 4, `the opening pool is ${opening.size} shapes`);
+  for (const id of opening) {
+    const shape = SHAPES[id];
+    assert.ok(shape.cells.length <= 4, `stage 0 shape ${id} has ${shape.cells.length} cells`);
+    assert.ok(shape.width <= 3 && shape.height <= 3, `stage 0 shape ${id} is ${shape.width}x${shape.height}`);
+  }
+  assert.ok(later.size > opening.size, `later stages must unlock more shapes: ${opening.size} -> ${later.size}`);
+  const awkward = [...later].filter((id) => SHAPES[id].cells.length >= 6);
+  assert.ok(awkward.length > 0, 'the 6-cell pieces only turn up later');
+  assert.ok(!opening.has(awkward[0]), 'no 6-cell piece is dealt in the opening stage');
+});
+
+test('every shape is reachable eventually', () => {
+  const seen = new Set();
+  for (const seed of [1, 7, 42, 2026, 987654321, 13, 99, 12345, 555, 8, 31, 64]) {
+    const game = createPlayableGame(seed);
+    game.moves = 1000; // deep into the last stage
+    for (let tray = 0; tray < 20; tray++) {
+      for (const piece of dealTray(game)) seen.add(piece.shapeId);
+    }
+  }
+  assert.equal(seen.size, SHAPE_COUNT, `only ${seen.size} of ${SHAPE_COUNT} shapes ever turn up`);
+});
+
+test('each stage offers everything the last one did, and more', () => {
+  assert.ok(STAGE_SHAPES.length === STAGE_COUNT, 'one pool per stage');
+  for (let i = 1; i < STAGE_SHAPES.length; i++) {
+    const previous = new Set(STAGE_SHAPES[i - 1]);
+    const current = new Set(STAGE_SHAPES[i]);
+    for (const id of previous) {
+      assert.ok(current.has(id), `stage ${i} dropped shape ${id} that stage ${i - 1} had`);
+    }
+    assert.ok(current.size > previous.size, `stage ${i} is not bigger than stage ${i - 1}`);
+  }
+  assert.equal(STAGE_SHAPES[STAGE_SHAPES.length - 1].length, SHAPE_COUNT, 'the last stage holds every shape');
+  for (const id of STAGE_SHAPES[STAGE_SHAPES.length - 1]) {
+    assert.ok(id >= 0 && id < SHAPE_COUNT, `stage holds a bad shape id ${id}`);
+  }
+});
+
+test('the stage advances on pieces placed, and never goes back', () => {
+  assert.equal(stageFor(0), 0);
+  assert.equal(stageFor(8), 0);
+  assert.equal(stageFor(9), 1);
+  assert.equal(stageFor(23), 1);
+  assert.equal(stageFor(24), 2);
+  assert.equal(stageFor(44), 2);
+  assert.equal(stageFor(45), 3);
+  assert.equal(stageFor(100000), STAGE_COUNT - 1);
+  let previous = 0;
+  for (let moves = 0; moves < 200; moves++) {
+    const stage = stageFor(moves);
+    assert.ok(stage >= previous, `stage went backwards at ${moves} moves`);
+    previous = stage;
+  }
+  assert.ok(stageNameFor(0).length > 0, 'stages are named for the player');
+});
+
+test('a stage boundary survives a save and restore', () => {
+  // The stage comes from `moves`, which is saved, so a game restored right on a
+  // boundary has to deal the same pieces the uninterrupted game would.
+  for (const moves of [0, 8, 9, 23, 24, 44, 45]) {
+    const game = createPlayableGame(20260928);
+    game.moves = moves;
+    const copy = deserialize(JSON.parse(JSON.stringify(serialize(game))));
+    assert.deepEqual(dealTray(copy), dealTray(game), `mismatch at ${moves} moves`);
+    assert.deepEqual(serialize(copy), serialize(game));
+  }
 });
 
 test('a full random game never produces an impossible state', () => {

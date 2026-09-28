@@ -1,4 +1,13 @@
-import { GRID, createPlayableGame, deserialize, isGameOver, placePiece, serialize } from './game.js';
+import {
+  GRID,
+  createPlayableGame,
+  deserialize,
+  isGameOver,
+  placePiece,
+  serialize,
+  stageFor,
+  stageNameFor,
+} from './game.js';
 import { createDragController } from './input.js';
 import { createRenderer } from './render.js';
 import { storage } from './storage.js';
@@ -103,6 +112,7 @@ function newGame() {
 }
 
 function onPlace(slot, originX, originY) {
+  const stage = stageFor(game.moves);
   const result = placePiece(game, slot, originX, originY);
   if (!result) return;
 
@@ -123,6 +133,13 @@ function onPlace(slot, originX, originY) {
   animating += 1;
 
   renderer.floatScore(`+${result.gained}`, result.lines >= 2);
+
+  // The tray has just been re-dealt, so this is the moment the new stage
+  // actually turns up. It is the only place the ramp is mentioned: a run should
+  // not feel like it is being levelled up.
+  if (stageFor(game.moves) !== stage) {
+    renderer.showToast(`New shapes · ${stageNameFor(game.moves)}`);
+  }
 
   const finish = () => {
     animating -= 1;

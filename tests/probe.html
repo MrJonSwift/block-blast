@@ -425,6 +425,18 @@
         check('score starts at zero', app.score() === 0, String(app.score()));
         check('board starts empty', app.blocks() === 0, String(app.blocks()));
 
+        // A run opens with the small, forgiving shapes only. The ramp itself is
+        // checked in tests/run.js; this is the end-to-end version of the same
+        // thing, on a tray dealt by the real app.
+        const openingSizes = JSON.parse(app.win.localStorage.getItem('blockblast.save.v1')).tray.map(
+          (piece) => SHAPES[piece.shapeId].cells.length
+        );
+        check(
+          'the opening tray is small pieces only',
+          openingSizes.every((size) => size <= 4),
+          openingSizes.join(',')
+        );
+
         // The sweep must be in phase 1, on an untouched board, so every slot
         // still holds its piece.
         const firstCount2 = pieceBlockCount(0);

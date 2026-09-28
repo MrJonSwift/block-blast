@@ -25,6 +25,10 @@ tab needs a connection.
 - Score: +1 per block, +10 per line cleared, plus a combo bonus of 18/36/54/72
   for clearing 2/3/4/5+ lines at once.
 - The game ends when no remaining piece fits anywhere.
+- Difficulty builds over a run rather than starting hard. The first pieces are
+  single cells, dominoes, 3-bars, 2×2 squares and L's; the awkward shapes — 5-bars,
+  6-cell L's, F and Y pieces — only turn up once you are well into the game. A
+  new stage says so once, in a brief toast, and that is the only mention.
 - Theme follows the system setting and can be overridden with the toggle in the
   top right.
 
@@ -47,6 +51,11 @@ Two details worth knowing if you change this code:
 - **`measure()` never writes styles.** The board is sized from the space left
   over by the tray, so resizing tray pieces mid-drag used to reflow the board
   and shift the snap by a cell. `sizePieces()` is a separate step.
+- **Shapes are dealt from a stage, not from the whole set.** `STAGES` in
+  `js/game.js` lists shape *families* per stage, and each stage's pool contains
+  the previous one's, so a shape you have never seen is never harder than the
+  ones you know. The stage comes from pieces placed, not score, so playing well
+  does not raise the stakes.
 - **The dragged piece is held clear of the finger**, two cells away from it, so
   your hand does not cover the piece you are placing. The tray decides which
   way: up in portrait, where the tray is below the board, and out to the left in

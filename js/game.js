@@ -140,6 +140,78 @@ export const SHAPE_FAMILIES = buildShapes();
 export const SHAPES = SHAPE_FAMILIES.flatMap((family) => family.variants);
 export const SHAPE_COUNT = SHAPES.length;
 
+/**
+ * Difficulty is a property of the stage, not of the individual shape: every
+ * shape in a stage is about equally easy, and each stage's pool contains the
+ * previous one's, so a shape you have never seen before is never *worse* than
+ * the ones you know. The awkward shapes are the long ones — 5-bars, 4-arm and
+ * 6-cell L's, F and Y pieces — and they are all in the last stage.
+ *
+ * The stage advances on pieces placed rather than score. Score is dominated by
+ * line clears, so gating on it would make playing well raise the stakes, and one
+ * lucky double-clear would jump a stage mid-run. Pieces placed advance evenly,
+ * and `moves` is already part of the save, so a restored game resumes at the
+ * right stage with no change to the save format.
+ */
+const STAGES = [
+  {
+    at: 0,
+    name: 'Warming up',
+    add: ['dot', 'h2', 'h3', 'o2', 'l3'],
+  },
+  {
+    at: 9,
+    name: 'Steady',
+    add: ['h4', 'r3x2', 'r3x2b', 's3', 't3', 't3v'],
+  },
+  {
+    at: 24,
+    name: 'Stretching',
+    add: ['r2x3', 'r2x3b', 'u3', 'u3v', 'z4v', 'l4', 'l4b', 'l4c', 'plus5'],
+  },
+  {
+    at: 45,
+    name: 'All of it',
+    add: ['h5', 'l5', 'l5b', 'l5c', 'f4', 'f4b', 'f5b', 'y5v', 'o3'],
+  },
+];
+
+/** The stage's shape ids, accumulated in stage order. Frozen; never mutated. */
+const STAGE_POOLS = (() => {
+  const byName = new Map(SHAPE_FAMILIES.map((family) => [family.name, family.variants]));
+  const pools = [];
+  const pool = [];
+  const seen = new Set();
+  for (const stage of STAGES) {
+    for (const name of stage.add) {
+      for (const variant of byName.get(name) || []) {
+        if (seen.has(variant.id)) continue;
+        seen.add(variant.id);
+        pool.push(variant.id);
+      }
+    }
+    pools.push(Object.freeze([...pool]));
+  }
+  return Object.freeze(pools);
+})();
+
+/** Shape ids available at each stage. Exported so tests can check the ramp. */
+export const STAGE_SHAPES = STAGE_POOLS;
+export const STAGE_COUNT = STAGES.length;
+
+/** The stage index for a run that has placed `moves` pieces. */
+export function stageFor(moves) {
+  let index = 0;
+  for (let i = 0; i < STAGES.length; i++) {
+    if (moves >= STAGES[i].at) index = i;
+  }
+  return index;
+}
+
+export function stageNameFor(moves) {
+  return STAGES[stageFor(moves)].name;
+}
+
 export function createRng(seed) {
   let state = seed >>> 0;
   const rng = () => {
@@ -181,15 +253,17 @@ export function createPlayableGame(seed) {
   return game;
 }
 
-function drawShape(game) {
+function dealPiece(game) {
   game.draws += 1;
   const rng = createRng(rngSeedFromDraws(game.seed, game.draws - 1));
-  const shape = SHAPES[Math.floor(rng() * SHAPE_COUNT)];
+  const pool = STAGE_POOLS[stageFor(game.moves)];
+  const shape = SHAPES[pool[Math.floor(rng() * pool.length)]];
   return { shapeId: shape.id, colorIndex: Math.floor(rng() * COLORS.length) };
 }
 
 export function dealTray(game) {
-  for (let i = 0; i < TRAY_SIZE; i++) game.tray[i] = drawShape(game);
+  for (let i = 0; i < TRAY_SIZE; i++) game.tray[i] = dealPiece(game);
+  return game.tray;
 }
 
 function shapeById(id) {
