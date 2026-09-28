@@ -28,19 +28,17 @@ jobs:
 
       - uses: actions/configure-pages@v5
 
+      - name: Assemble the app shell
+        run: |
+          mkdir -p _site/js _site/icons
+          cp .nojekyll index.html styles.css sw.js manifest.webmanifest favicon.svg _site/
+          cp js/*.js _site/js/
+          cp icons/*.png _site/icons/
+          ls -R _site
+
       - uses: actions/upload-pages-artifact@v3
         with:
-          # Only the app shell is published; tests and tools stay in the repo.
-          # These must match the precache list in sw.js.
-          path: |
-            .nojekyll
-            index.html
-            styles.css
-            sw.js
-            manifest.webmanifest
-            favicon.svg
-            js/
-            icons/
+          path: _site
 
       - id: deployment
         uses: actions/deploy-pages@v4
