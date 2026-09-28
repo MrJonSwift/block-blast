@@ -1,0 +1,13 @@
+{
+  "name": "block-blast",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Offline-capable Block Blast PWA for iOS Home Screen",
+  "type": "module",
+  "scripts": {
+    "test": "node tests/run.js",
+    "test:browser": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/probe.ps1",
+    "serve": "node tools/serve.js",
+    "icons": "powershell -NoProfile -ExecutionPolicy Bypass -File tools/make-icons.ps1"
+  }
+}

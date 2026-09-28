@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>probe</title>
+    <style>
+      body {
+        margin: 0;
+        font: 12px/1.45 monospace;
+        background: #111;
+        color: #ddd;
+      }
+      #report {
+        white-space: pre-wrap;
+        margin: 0;
+        padding: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <pre id="report">running</pre>
+    <script type="module">
+      import { SHAPES, fitsAt } from '/js/game.js';
+
+      // The app is driven inside a fixed-size iframe so the layout is measured
+      // at a real phone viewport (headless Chrome clamps its own window to a
+      // ~500px minimum, so the window size cannot be used directly).
+      const WIDTH = Number(new URLSearchParams(location.search).get('w') ?? 390);
+      const HEIGHT = Number(new URLSearchParams(location.search).get('h') ?? 844);
+      const DARK = new URLSearchParams(location.search).get('dark') === '1';
+      // Screenshot mode: fill the window and hide the report, so a headless
+      // capture shows just the app.
+      const SHOT = new URLSearchParams(location.search).get('shot') === '1';
+      if (SHOT) {
+        document.getElementById('report').style.display = 'none';
+        document.body.style.background = 'transparent';
+      }
+
+      const lines = [];
+      let failures = 0;
+      const log = (text) => lines.push(text);
+      const check = (name, condition, detail = '') => {
+        if (!condition) failures += 1;
+        log(`${condition ? 'PASS' : 'FAIL'}  ${name}${detail ? `  [${detail}]` : ''}`);
+      };
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+      const frame = document.createElement('iframe');
+      frame.width = SHOT ? window.innerWidth : WIDTH;
+      frame.height = SHOT ? window.innerHeight : HEIGHT;
+      frame.style.cssText = 'border:0;display:block';
+      frame.src = 'about:blank';
+      document.body.appendChild(frame);
+
+      const errors = [];
+      const hookErrors = (win) => {
+        win.addEventListener('error', (e) => {
+          errors.push(`${e.message} @ ${e.filename}:${e.lineno}:${e.colno}`);
+        });
+        win.addEventListener('unhandledrejection', (e) => {
+          errors.push(`unhandled: ${e.reason && e.reason.message ? e.reason.message : e.reason}`);
+        });
+      };
+
+      let app = null;
+      const attach = () => {
+        const doc = frame.contentDocument;
+        const win = frame.contentWindow;
+        return {
+          doc,
+          win,
+          rect: (selector) => {
+            const node = doc.querySelector(selector);
+            return node ? node.getBoundingClientRect() : null;
+          },
+          blocks: () => doc.querySelectorAll('#board .block').length,
+          score: () => Number(doc.getElementById('score').textContent.replace(/[^\d]/g, '')),
+          blockKeys: () =>
+            [...doc.querySelectorAll('#board .block')]
+              .map((n) => `${Number(n.style.gridColumn) - 1},${Number(n.style.gridRow) - 1}`)
+              .sort(),
+          pieces: () => [...doc.querySelectorAll('.slot')].filter((s) => s.querySelector('.piece')).length,
+        };
+      };
+
+      /**
+       * Waits for a *newly committed* document with the app mounted and its
+       * stylesheet applied. Comparing against the previous document matters:
+       * right after setting src, contentDocument still exposes the old one.
+       */
+      const waitForApp = async (previous, tries = 400) => {
+        for (let i = 0; i < tries; i++) {
+          try {
+            const doc = frame.contentDocument;
+            if (
+              doc &&
+              doc !== previous &&
+              doc.readyState === 'complete' &&
+              doc.querySelectorAll('#board .cell').length === 64 &&
+              doc.styleSheets.length > 0
+            ) {
+              app = attach();
+              hookErrors(app.win);
+              await sleep(150);
+              return true;
+            }
+          } catch {
+            /* not loaded yet */
+          }
+          await sleep(25);
+        }
+        return false;
+      };
+
+      const loadApp = async (query = '') => {
+        const previous = frame.contentDocument;
+        frame.src = `/index.html${query}`;
+        const ok = await waitForApp(previous);
+        if (ok && DARK) app.doc.documentElement.dataset.theme = 'dark';
+        return ok;
+      };
+
+      const pointer = (target, type, x, y, id = 7) => {
+        target.dispatchEvent(
+          new PointerEvent(type, {
+            pointerId: id,
+            pointerType: 'touch',
+            isPrimary: true,
+            bubbles: true,
+            cancelable: true,
+            clientX: x,
+            clientY: y,
+            button: 0,
+            buttons: type === 'pointerup' ? 0 : 1,
+          })
+        );
+      };
+
+      /** Counts the filled blocks in a tray slot (a bounding box is not all filled). */
+      const pieceBlockCount = (slot) => {
+        const node = app.doc.querySelectorAll('.slot')[slot];
+        return node ? node.querySelectorAll('.piece-block').length : 0;
+      };
+
+      /** Finds the first legal (or first illegal) origin for a tray piece. */
+      const findOrigin = (slot, wantFit) => {
+        const raw = app.win.localStorage.getItem('blockblast.save.v1');
+        if (!raw) return null;
+        const save = JSON.parse(raw);
+        const piece = save.tray[slot];
+        if (!piece) return null;
+        const board = Uint8Array.from(save.board);
+        for (let y = 0; y < 8; y++) {
+          for (let x = 0; x < 8; x++) {
+            const fits = fitsAt({ board }, piece.shapeId, x, y);
+            if (fits === wantFit) return { x, y, count: SHAPES[piece.shapeId].cells.length };
+          }
+        }
+        return null;
+      };
+
+      /**
+       * Drags tray slot `slot` so the piece's origin lands exactly on (cx, cy).
+       * Mirrors the app's own maths: it centres the piece box on the finger and
+       * snaps the origin to round((left - boardLeft - gap) / pitch), so aiming
+       * at cells[0].left + cx*pitch + pieceWidth/2 makes the snap exact.
+       */
+      const dragTo = async (slot, cx, cy) => {
+        const slotNode = app.doc.querySelectorAll('.slot')[slot];
+        if (!slotNode || !slotNode.querySelector('.piece')) return { ok: false, why: 'empty slot' };
+        const cellNodes = app.doc.querySelectorAll('#board .cell');
+        const cell0 = cellNodes[0].getBoundingClientRect();
+        const cell1 = cellNodes[1].getBoundingClientRect();
+        const slotRect = slotNode.getBoundingClientRect();
+
+        const block = cell0.width;
+        const pitch = cell1.left - cell0.left;
+        const gap = pitch - block;
+
+        const pieceStyle = app.win.getComputedStyle(slotNode.querySelector('.piece'));
+        const cellsX = pieceStyle.gridTemplateColumns.split(' ').length;
+        const cellsY = pieceStyle.gridTemplateRows.split(' ').length;
+        const pieceW = cellsX * block + (cellsX - 1) * gap;
+        const pieceH = cellsY * block + (cellsY - 1) * gap;
+
+        const toX = cell0.left + cx * pitch + pieceW / 2;
+        const toY = cell0.top + cy * pitch + pieceH / 2;
+        const fromX = slotRect.left + slotRect.width / 2;
+        const fromY = slotRect.top + slotRect.height / 2;
+
+        pointer(slotNode, 'pointerdown', fromX, fromY);
+        for (let i = 1; i <= 5; i++) {
+          pointer(app.win, 'pointermove', fromX + ((toX - fromX) * i) / 5, fromY + ((toY - fromY) * i) / 5);
+        }
+        const ghost = app.doc.querySelector('.drag');
+        const firstGhostCell = app.doc.querySelector('.ghost-cell');
+        const ghostStyle = app.win.getComputedStyle(slotNode.querySelector('.piece'));
+        const diag = {
+          ghost: Boolean(ghost),
+          ghostLeft: ghost ? ghost.style.transform : '',
+          ghostCells: app.doc.querySelectorAll('.ghost-cell').length,
+          invalidCells: app.doc.querySelectorAll('.ghost-cell.invalid').length,
+          // The app's own idea of the origin, read from the preview placement.
+          previewOrigin: firstGhostCell
+            ? `${Number(firstGhostCell.style.gridColumn) - 1},${Number(firstGhostCell.style.gridRow) - 1}`
+            : 'none',
+          lineHints: app.doc.querySelectorAll('.line-hint').length,
+          toX: toX.toFixed(2),
+          toY: toY.toFixed(2),
+          cell0Left: cell0.left.toFixed(2),
+          pitch: pitch.toFixed(2),
+          block: block.toFixed(2),
+          gap: gap.toFixed(2),
+          pieceW: pieceW.toFixed(2),
+          pieceH: pieceH.toFixed(2),
+          offsetPitch: (cellNodes[1].offsetLeft - cellNodes[0].offsetLeft).toFixed(2),
+          offsetBlock: cellNodes[0].offsetWidth,
+        };
+        pointer(app.win, 'pointerup', toX, toY);
+        await sleep(450);
+        return { ok: true, cellsX, cellsY, diag };
+      };
+
+      const layoutChecks = () => {
+        const { win, doc } = app;
+        log(`viewport ${win.innerWidth}x${win.innerHeight}`);
+        check(
+          'no horizontal overflow',
+          doc.documentElement.scrollWidth <= win.innerWidth,
+          `scrollWidth=${doc.documentElement.scrollWidth}`
+        );
+        for (const selector of ['.hud', '#theme-toggle', '.stage', '.board-wrap', '#board', '.tray', '.slot']) {
+          const r = app.rect(selector);
+          check(
+            `${selector} within viewport`,
+            r && r.left >= -1 && r.right <= win.innerWidth + 1,
+            r ? `l=${r.left.toFixed(0)} r=${r.right.toFixed(0)}` : 'missing'
+          );
+        }
+        const boardRect = app.rect('#board');
+        const trayRect = app.rect('.tray');
+        check(
+          'board is square',
+          Math.abs(boardRect.width - boardRect.height) < 2,
+          `${boardRect.width.toFixed(0)}x${boardRect.height.toFixed(0)}`
+        );
+        // Works for both the column and the row (landscape) layout: the board
+        // and tray must not overlap, whatever their relative arrangement.
+        const overlaps =
+          boardRect.left < trayRect.right &&
+          trayRect.left < boardRect.right &&
+          boardRect.top < trayRect.bottom &&
+          trayRect.top < boardRect.bottom;
+        check(
+          'board does not overlap the tray',
+          !overlaps,
+          `board=${boardRect.left.toFixed(0)},${boardRect.top.toFixed(0)} ${boardRect.width.toFixed(0)}x${boardRect.height.toFixed(0)} tray=${trayRect.left.toFixed(0)},${trayRect.top.toFixed(0)} ${trayRect.width.toFixed(0)}x${trayRect.height.toFixed(0)}`
+        );
+        const fits = (r) => r.top >= -1 && r.left >= -1 && r.bottom <= win.innerHeight + 1 && r.right <= win.innerWidth + 1;
+        check('board fully on screen', fits(boardRect), `b=${boardRect.bottom.toFixed(0)} r=${boardRect.right.toFixed(0)}`);
+        check(
+          'tray fully on screen',
+          fits(trayRect),
+          `b=${trayRect.bottom.toFixed(0)} r=${trayRect.right.toFixed(0)}`
+        );
+        check('64 board cells', app.doc.querySelectorAll('#board .cell').length === 64);
+        check('3 tray slots', app.doc.querySelectorAll('.slot').length === 3);
+        check('3 pieces in tray', app.pieces() === 3, `${app.pieces()}`);
+        check('install hint hidden off iOS', app.doc.getElementById('install').hidden === true);
+      };
+
+      /**
+       * Starts a drag toward (cx, cy), reads the app's own previewed origin,
+       * then cancels — so the board is never modified.
+       */
+      const peek = async (slot, cx, cy) => {
+        const slotNode = app.doc.querySelectorAll('.slot')[slot];
+        if (!slotNode || !slotNode.querySelector('.piece')) return 'empty-slot';
+        const cellNodes = app.doc.querySelectorAll('#board .cell');
+        const cell0 = cellNodes[0].getBoundingClientRect();
+        const cell1 = cellNodes[1].getBoundingClientRect();
+        const slotRect = slotNode.getBoundingClientRect();
+        const block = cell0.width;
+        const pitch = cell1.left - cell0.left;
+        const gap = pitch - block;
+        const style = app.win.getComputedStyle(slotNode.querySelector('.piece'));
+        const cellsX = style.gridTemplateColumns.split(' ').length;
+        const cellsY = style.gridTemplateRows.split(' ').length;
+        const pieceW = cellsX * block + (cellsX - 1) * gap;
+        const pieceH = cellsY * block + (cellsY - 1) * gap;
+        const toX = cell0.left + cx * pitch + pieceW / 2;
+        const toY = cell0.top + cy * pitch + pieceH / 2;
+        const fromX = slotRect.left + slotRect.width / 2;
+        const fromY = slotRect.top + slotRect.height / 2;
+
+        pointer(slotNode, 'pointerdown', fromX, fromY);
+        pointer(app.win, 'pointermove', toX, toY);
+        const ghostCells = [...app.doc.querySelectorAll('.preview-layer .ghost-cell')];
+        const ghost = app.doc.querySelector('.drag');
+        const match = ghost ? /translate3d\((-?[\d.]+)px,\s*(-?[\d.]+)px/.exec(ghost.style.transform) : null;
+        let result = 'none';
+        if (ghostCells.length) {
+          // The origin is the piece's bounding box origin, not its first cell.
+          const cols = ghostCells.map((c) => Number(c.style.gridColumn) - 1);
+          const rows = ghostCells.map((c) => Number(c.style.gridRow) - 1);
+          const invalid = ghostCells.every((c) => c.classList.contains('invalid'));
+          result = `${invalid ? 'invalid@' : ''}${Math.min(...cols)},${Math.min(...rows)}`;
+        }
+        const out = {
+          origin: result,
+          appLeft: match ? Number(match[1]) : null,
+          appTop: match ? Number(match[2]) : null,
+        };
+        pointer(app.win, 'pointercancel', toX, toY);
+        await sleep(60);
+        return out;
+      };
+
+      const report = () => {
+        if (SHOT) return;
+        if (errors.length) {
+          log('');
+          log('app errors:');
+          for (const e of errors) log(`  ! ${e}`);
+        }
+        log('');
+        log(failures === 0 ? 'ALL PASS' : `${failures} FAILURE(S)`);
+        document.getElementById('report').textContent = lines.join('\n');
+      };
+
+      const gridDiag = (label) => {
+        const board = app.doc.getElementById('board');
+        const win = app.win;
+        const template = win.getComputedStyle(board).gridTemplateColumns;
+        const kids = [...board.children];
+        const inFlow = kids.filter((k) => win.getComputedStyle(k).position !== 'absolute');
+        const r0 = kids[0].getBoundingClientRect();
+        const r1 = kids[1].getBoundingClientRect();
+        const boardRect = board.getBoundingClientRect();
+        log(
+          `  grid[${label}]: board=${boardRect.width.toFixed(1)}x${boardRect.height.toFixed(1)} ` +
+            `--gap=${win.getComputedStyle(board).getPropertyValue('--gap').trim()} ` +
+            `rootFont=${win.getComputedStyle(app.doc.documentElement).fontSize} ` +
+            `pitch=${(r1.left - r0.left).toFixed(2)} cols=${template.split(' ').length} ` +
+            `children=${kids.length} inFlow=${inFlow.length} sheets=${app.doc.styleSheets.length}`
+        );
+        log(`  sheets: ${[...app.doc.styleSheets].map((s) => s.href || 'inline').join(' | ')}`);
+      };
+
+      try {
+        // Boot once so the iframe has a real same-origin document, then wipe
+        // storage and boot again to guarantee a clean start.
+        if (!(await loadApp())) throw new Error('app never booted');
+        app.win.localStorage.clear();
+        app.win.sessionStorage.clear();
+        if (!(await loadApp('?clean=1'))) throw new Error('app never booted clean');
+
+        log('--- phase 1: layout and first move ---');
+        layoutChecks();
+        gridDiag('phase1');
+        check('score starts at zero', app.score() === 0, String(app.score()));
+        check('board starts empty', app.blocks() === 0, String(app.blocks()));
+
+        // The sweep must be in phase 1, on an untouched board, so every slot
+        // still holds its piece.
+        const firstCount2 = pieceBlockCount(0);
+        const boardRect0 = app.rect('#board');
+        const cellRects0 = [...app.doc.querySelectorAll('#board .cell')].slice(0, 2).map((c) => c.getBoundingClientRect());
+        const cs0 = app.win.getComputedStyle(app.doc.getElementById('board'));
+        log(
+          `  geom: board.left=${boardRect0.left.toFixed(2)} padLeft=${cs0.paddingLeft} gridGap=${cs0.gridGap} ` +
+            `cell0=(${cellRects0[0].left.toFixed(2)},${cellRects0[0].top.toFixed(2)}) w=${cellRects0[0].width.toFixed(2)} ` +
+            `cell1.left=${cellRects0[1].left.toFixed(2)}`
+        );
+        const sweep = [];
+        for (let x = 0; x < 8; x++) {
+          const r = await peek(0, x, 0);
+          sweep.push(`${x}->${r.origin}/L${r.appLeft}`);
+        }
+        log(`  sweep: ${sweep.join('  ')}`);
+        // The X origin must always match the aim. The Y origin can only be read
+        // from a valid preview, because an invalid one drops out-of-bounds
+        // cells and its rendered bounding box no longer starts at the origin.
+        const sweepOk = sweep.every((entry) => {
+          const m = /^(\d+)->(invalid@)?(\d+),(\d+)\//.exec(entry);
+          if (!m) return false;
+          if (Number(m[1]) !== Number(m[3])) return false;
+          return m[2] ? true : m[4] === '0';
+        });
+        check('snap maps every column to the aimed column', sweepOk, sweep.join(' '));
+        check('board unchanged by the sweep', app.blocks() === 0, `${app.blocks()}`);
+        void firstCount2;
+
+        const firstCount = pieceBlockCount(0);
+        const drag = await dragTo(0, 0, 0);
+        check('drag reported a piece', drag.ok, drag.why || `${drag.cellsX}x${drag.cellsY} box`);
+        log(`  diag first move: ${JSON.stringify(drag.diag)}`);
+        check('placed every block of the piece', app.blocks() === firstCount, `${app.blocks()} of ${firstCount}`);
+        check('score equals blocks placed', app.score() === firstCount, String(app.score()));
+        check('tray now shows 2 pieces', app.pieces() === 2, `${app.pieces()}`);
+        check('no ghost left behind', app.doc.querySelectorAll('.drag').length === 0);
+        check('no preview left behind', app.doc.querySelectorAll('.ghost-cell').length === 0);
+
+        // Saving must happen on the move itself, not only on pagehide.
+        const savedRaw = app.win.localStorage.getItem('blockblast.save.v1');
+        check('save written immediately after the move', Boolean(savedRaw));
+        const saved = savedRaw ? JSON.parse(savedRaw) : null;
+        check('save contains the new blocks', Boolean(saved) && saved.board.filter((v) => v > 0).length === app.blocks());
+        check('save score matches', Boolean(saved) && saved.score === app.score(), `${saved && saved.score} vs ${app.score()}`);
+        check('save keeps the used slot empty', Boolean(saved) && saved.tray[0] === null);
+
+        const expected = { blocks: app.blocks(), score: app.score(), keys: app.blockKeys() };
+
+        log('--- phase 2: real reload of the app ---');
+        if (!(await loadApp('?v=2'))) throw new Error('app never reloaded');
+        check('board restored', app.blocks() === expected.blocks, `${expected.blocks} -> ${app.blocks()}`);
+        check('score restored', app.score() === expected.score, `${expected.score} -> ${app.score()}`);
+        check(
+          'restored blocks sit in the same cells',
+          JSON.stringify(app.blockKeys()) === JSON.stringify(expected.keys),
+          app.blockKeys().join(' ')
+        );
+        check('tray restored with 2 pieces', app.pieces() === 2, `${app.pieces()}`);
+        gridDiag('phase2');
+
+        // An illegal drop must change nothing. Pick a cell the piece provably
+        // does not fit in, rather than assuming one.
+        const noFit = findOrigin(1, false);
+        check('found an illegal cell for the piece', Boolean(noFit), noFit ? `${noFit.x},${noFit.y}` : 'none');
+        if (noFit) {
+          const saveBefore = JSON.parse(app.win.localStorage.getItem('blockblast.save.v1'));
+          const shapeId = saveBefore.tray[1] && saveBefore.tray[1].shapeId;
+          log(
+            `  diag: slot1 shape=${shapeId} cells=${JSON.stringify(
+              shapeId === null || shapeId === undefined ? null : SHAPES[shapeId].cells
+            )} aim=(${noFit.x},${noFit.y}) boardFilled=${saveBefore.board.filter((v) => v > 0).length}`
+          );
+        }
+        const beforeDrop = { blocks: app.blocks(), score: app.score(), keys: app.blockKeys() };
+        if (noFit) {
+          const bad = await dragTo(1, noFit.x, noFit.y);
+          check('illegal drop attempt ran', bad.ok, bad.why || '');
+          log(`  diag aim: ${JSON.stringify(bad.diag)}`);
+          log(`  diag drop: blocks now ${app.blockKeys().join(' ')}`);
+          check(
+            'illegal drop is a no-op',
+            app.blocks() === beforeDrop.blocks && app.score() === beforeDrop.score,
+            `blocks=${app.blocks()} score=${app.score()}`
+          );
+          check('no ghost after illegal drop', app.doc.querySelectorAll('.drag').length === 0);
+        }
+
+        // A legal move still works after a restore.
+        const fit = findOrigin(1, true);
+        check('found a legal spot for the piece', Boolean(fit), fit ? `${fit.x},${fit.y}` : 'none');
+        if (fit) {
+          const beforeSecond = { blocks: app.blocks(), score: app.score() };
+          const placed = await dragTo(1, fit.x, fit.y);
+          log(`  diag: ${JSON.stringify(placed.diag)}`);
+          // A placement can also clear lines, so assert on the score (always
+          // grows) and that the board did not gain more than the piece's cells.
+          check(
+            'legal move after restore scores the piece',
+            app.score() >= beforeSecond.score + fit.count,
+            `${beforeSecond.score} -> ${app.score()} (piece ${fit.count})`
+          );
+          check(
+            'legal move after restore placed the piece',
+            app.blocks() <= beforeSecond.blocks + fit.count,
+            `${beforeSecond.blocks} -> ${app.blocks()}`
+          );
+        }
+
+        // Theme toggle: assert on the stored preference and the label, not the
+        // resolved colour, which depends on the OS setting.
+        const readTheme = () => JSON.parse(app.win.localStorage.getItem('blockblast.theme.v1') || 'null');
+        const seen = new Set();
+        let labelBefore = app.doc.getElementById('theme-toggle').getAttribute('aria-label');
+        for (let i = 0; i < 3; i++) {
+          app.doc.getElementById('theme-toggle').click();
+          const value = readTheme();
+          seen.add(value);
+          const label = app.doc.getElementById('theme-toggle').getAttribute('aria-label');
+          if (label === labelBefore) {
+            check('theme label updates', false, `stuck on ${value}`);
+          }
+          labelBefore = label;
+        }
+        check('theme preference cycles through 3 values', seen.size === 3, [...seen].join(','));
+        check(
+          'theme persisted to storage',
+          ['light', 'dark', 'system'].includes(readTheme()),
+          String(readTheme())
+        );
+
+        // Service worker registration (localhost is a secure context).
+        await sleep(600);
+        const swReady = await app.win.navigator.serviceWorker?.getRegistration();
+        check('service worker registered', Boolean(swReady), swReady ? swReady.scope : 'none');
+
+        // Screenshot mode can force the light theme (headless defaults to dark).
+        if (SHOT && new URLSearchParams(location.search).get('light') === '1') {
+          const toggle = app.doc.getElementById('theme-toggle');
+          for (let i = 0; i < 3; i++) {
+            if (app.doc.documentElement.dataset.theme === 'light') break;
+            toggle.click();
+          }
+          await sleep(120);
+        }
+      } catch (error) {
+        failures += 1;
+        log(`ERROR ${error && error.message ? error.message : error}`);
+        log(String((error && error.stack) || '').split('\n').slice(0, 4).join('\n'));
+      }
+
+      report();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Block Blast</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="description" content="Block Blast - a calm, offline block puzzle." />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#1b1d2a" />
+
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./icons/icon-180.png" />
+    <link rel="stylesheet" href="./styles.css" />
+
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Block Blast" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="hud">
+        <div class="stat">
+          <span class="stat-label">Score</span>
+          <span class="stat-value" id="score">0</span>
+        </div>
+        <div class="stat stat-right">
+          <span class="stat-label">Best</span>
+          <span class="stat-value" id="best">0</span>
+        </div>
+        <button class="icon-button" id="theme-toggle" type="button" aria-label="Change theme">
+          <span id="theme-glyph" aria-hidden="true">◐</span>
+        </button>
+      </header>
+
+      <main class="stage">
+        <div class="board-wrap">
+          <div class="board" id="board" role="grid" aria-label="Block Blast board"></div>
+          <div class="toast" id="toast" aria-live="polite"></div>
+        </div>
+      </main>
+
+      <footer class="tray-area">
+        <div class="tray" id="tray" aria-label="Available pieces"></div>
+      </footer>
+    </div>
+
+    <div class="overlay" id="overlay" hidden>
+      <div class="card" role="dialog" aria-modal="true" aria-labelledby="overlay-title">
+        <h1 class="card-title" id="overlay-title">Game over</h1>
+        <p class="card-score" id="overlay-score">0</p>
+        <p class="card-note" id="overlay-note">Best 0</p>
+        <button class="button" id="new-game" type="button">New game</button>
+      </div>
+    </div>
+
+    <div class="install" id="install" hidden>
+      <p class="install-text">
+        Add to your Home Screen to play offline: tap <strong>Share</strong>, then
+        <strong>Add to Home Screen</strong>.
+      </p>
+      <button class="install-close" id="install-close" type="button" aria-label="Dismiss">×</button>
+    </div>
+
+    <script type="module" src="./js/main.js"></script>
+  </body>
+</html>
