@@ -39,7 +39,13 @@
 
       const lines = [];
       let failures = 0;
-      const log = (text) => lines.push(text);
+      const reportEl = document.getElementById('report');
+      // Written as it goes, not just at the end: a run that is killed by the
+      // headless time budget should still show how far it got.
+      const log = (text) => {
+        lines.push(text);
+        reportEl.textContent = lines.join('\n');
+      };
       const check = (name, condition, detail = '') => {
         if (!condition) failures += 1;
         log(`${condition ? 'PASS' : 'FAIL'}  ${name}${detail ? `  [${detail}]` : ''}`);
@@ -90,9 +96,16 @@
        * right after setting src, contentDocument still exposes the old one.
        */
       const waitForApp = async (previous, tries = 400) => {
+        const hooked = new WeakSet();
         for (let i = 0; i < tries; i++) {
           try {
             const doc = frame.contentDocument;
+            // Hook the new window as soon as it exists, not once the app is
+            // mounted: a throw during boot would otherwise be missed entirely.
+            if (doc && doc !== previous && !hooked.has(doc.defaultView)) {
+              if (doc.defaultView) hookErrors(doc.defaultView);
+              hooked.add(doc.defaultView);
+            }
             if (
               doc &&
               doc !== previous &&
@@ -101,7 +114,6 @@
               doc.styleSheets.length > 0
             ) {
               app = attach();
-              hookErrors(app.win);
               await sleep(150);
               return true;
             }
@@ -110,7 +122,12 @@
           }
           await sleep(25);
         }
-        return false;
+        const doc = frame.contentDocument;
+        throw new Error(
+          `app never mounted (cells=${doc ? doc.querySelectorAll('#board .cell').length : 'no document'}` +
+            `, readyState=${doc ? doc.readyState : '-'}` +
+            `${errors.length ? `, errors: ${errors.join(' | ')}` : ''})`
+        );
       };
 
       const loadApp = async (query = '') => {
@@ -285,6 +302,18 @@
         return { ok: valid.length >= 4 && mismatched.length === 0, valid: valid.length, mismatched };
       };
 
+      /**
+       * Boots the app on a save written by the test. The live document is
+       * unloaded first, because the app persists on pagehide and its handler
+       * would otherwise overwrite the crafted save on the way out.
+       */
+      const loadWithSave = async (save, query) => {
+        frame.src = 'about:blank';
+        await sleep(40);
+        localStorage.setItem('blockblast.save.v1', JSON.stringify(save));
+        return loadApp(query);
+      };
+
       const layoutChecks = () => {
         const { win, doc } = app;
         log(`viewport ${win.innerWidth}x${win.innerHeight}`);
@@ -389,7 +418,7 @@
         }
         log('');
         log(failures === 0 ? 'ALL PASS' : `${failures} FAILURE(S)`);
-        document.getElementById('report').textContent = lines.join('\n');
+        reportEl.textContent = lines.join('\n');
       };
 
       const gridDiag = (label) => {
@@ -623,6 +652,79 @@
         await sleep(600);
         const swReady = await app.win.navigator.serviceWorker?.getRegistration();
         check('service worker registered', Boolean(swReady), swReady ? swReady.scope : 'none');
+
+        // ---- phase 3: a dead end, and the rescue ----
+        log('--- phase 3: stuck tray rescue ---');
+        // Full but for the diagonal: no row or column has room for anything but
+        // a single cell, and the tray holds 5-bars, so nothing can be played.
+        const deadBoard = [];
+        for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) deadBoard.push(x === y ? 0 : 1);
+        const bar = SHAPES.find((s) => s.cells.length === 5 && s.width === 5);
+        const fits = (board, tray) =>
+          tray.some((piece) => {
+            for (let y = 0; y < 8; y++) {
+              for (let x = 0; x < 8; x++) if (fitsAt({ board: Uint8Array.from(board) }, piece.shapeId, x, y)) return true;
+            }
+            return false;
+          });
+        const deadTray = [0, 1, 2].map(() => ({ shapeId: bar.id, colorIndex: 0 }));
+        const craftSave = (rescues) => ({
+          version: 1,
+          board: deadBoard,
+          tray: deadTray,
+          score: 1234,
+          moves: 12,
+          best: 1234,
+          rescues,
+          seed: 987654,
+          draws: 20,
+        });
+        if (!(await loadWithSave(craftSave(0), '?v=3'))) throw new Error('app never reloaded the stuck save');
+        check('a stuck game opens on the game over card', app.doc.getElementById('overlay').hidden === false);
+        check('the board is the crafted dead end', app.blocks() === 56, `${app.blocks()}`);
+        const keepButton = () => app.doc.getElementById('keep-going');
+        check('keep going is offered on a stuck tray', keepButton().hidden === false, keepButton().textContent);
+        check('the offer says how many are left', keepButton().textContent.includes('3 left'), keepButton().textContent);
+        check('the score is shown, not changed', app.score() === 1234, String(app.score()));
+
+        const spendRescue = async (wantRescues) => {
+          keepButton().click();
+          await sleep(40);
+          const saved = JSON.parse(app.win.localStorage.getItem('blockblast.save.v1'));
+          check(`rescue ${wantRescues} is counted and saved`, saved.rescues === wantRescues, `rescues=${saved.rescues}`);
+          check('the tray is full again', saved.tray.every((p) => p !== null), 'tray re-dealt');
+          check('the board is untouched', saved.board.every((v, i) => v === deadBoard[i]));
+          check('the score is untouched', saved.score === 1234, String(saved.score));
+          // The card is only still up if the game really is over, and only
+          // offers a rescue that is left.
+          const stuck = !fits(saved.board, saved.tray);
+          check('the card matches the fresh tray', app.doc.getElementById('overlay').hidden === !stuck, `stuck=${stuck}`);
+          check(
+            'the offer matches what is left',
+            keepButton().hidden === (!stuck || saved.rescues >= 3),
+            `hidden=${keepButton().hidden} rescues=${saved.rescues}`
+          );
+        };
+        await spendRescue(1);
+
+        // Straight to the last one, so the cap is checked whatever the re-deals
+        // happen to hold.
+        if (!(await loadWithSave(craftSave(2), '?v=4'))) throw new Error('app never reloaded');
+        check('the last rescue says so', keepButton().textContent.includes('1 left'), keepButton().textContent);
+        await spendRescue(3);
+
+        // And a run that has spent them all is offered nothing, even though it
+        // is still stuck.
+        if (!(await loadWithSave(craftSave(3), '?v=5'))) throw new Error('app never reloaded');
+        check('a spent run still shows the card', app.doc.getElementById('overlay').hidden === false);
+        check('a spent run is offered no rescue', keepButton().hidden === true, keepButton().textContent);
+        check('the score is still the run score', app.score() === 1234, String(app.score()));
+
+        if (!(await loadApp('?v=6'))) throw new Error('app never reloaded after a rescue');
+        const afterReload = JSON.parse(app.win.localStorage.getItem('blockblast.save.v1'));
+        check('rescues survive a reload', afterReload.rescues === 3, `rescues=${afterReload.rescues}`);
+        check('the rescued tray survives a reload', app.pieces() === 3, `${app.pieces()}`);
+
 
         // Screenshot mode can force the light theme (headless defaults to dark).
         if (SHOT && new URLSearchParams(location.search).get('light') === '1') {

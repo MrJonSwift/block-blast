@@ -24,7 +24,10 @@ tab needs a connection.
   the rows and columns that will clear.
 - Score: +1 per block, +10 per line cleared, plus a combo bonus of 18/36/54/72
   for clearing 2/3/4/5+ lines at once.
-- The game ends when no remaining piece fits anywhere.
+- The game ends when no remaining piece fits anywhere. If that happens you get
+  three **Keep going** chances to re-deal the tray, so one awkward piece does not
+  have to end a run. It costs no score, and it is only ever offered on a tray
+  that cannot be played, so it cannot be used to reroll for a better hand.
 - Difficulty builds over a run rather than starting hard. The first pieces are
   single cells, dominoes, 3-bars, 2×2 squares and L's; the awkward shapes — 5-bars,
   6-cell L's, F and Y pieces — only turn up once you are well into the game. A
@@ -84,7 +87,10 @@ powershell -File tools/probe.ps1 -Port 9412 -Passes 3
 
 `tests/probe.html` is the browser harness: it loads the real `index.html` in a
 fixed-size iframe, plays moves with synthetic pointer events, reloads to verify
-the save is restored, and checks the layout at each viewport.
+the save is restored, checks the layout at each viewport, and boots the app on
+crafted saves to check the game-over card and the keep-going offer. It writes
+its report as it goes, so a run that is cut short by the headless time budget
+still shows how far it got.
 
 ## Deploying
 

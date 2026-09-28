@@ -1,9 +1,12 @@
 import {
   GRID,
+  MAX_RESCUES,
+  canRescue,
   createPlayableGame,
   deserialize,
   isGameOver,
   placePiece,
+  rescueTray,
   serialize,
   stageFor,
   stageNameFor,
@@ -28,6 +31,7 @@ const dom = {
   overlay: document.getElementById('overlay'),
   overlayScore: document.getElementById('overlay-score'),
   overlayNote: document.getElementById('overlay-note'),
+  keepGoing: document.getElementById('keep-going'),
   newGame: document.getElementById('new-game'),
   install: document.getElementById('install'),
   installClose: document.getElementById('install-close'),
@@ -90,9 +94,20 @@ function paintHud(bump) {
   }
 }
 
+/**
+ * Renders the end-of-run card. The "keep going" offer is decided by the model,
+ * not here, so the rule that a rescue is only available on a dead tray lives in
+ * one place.
+ */
 function showOverlay() {
   dom.overlayScore.textContent = game.score.toLocaleString();
-  dom.overlayNote.textContent = game.best === game.score ? 'New personal best' : `Best ${game.best.toLocaleString()}`;
+  const left = MAX_RESCUES - game.rescues;
+  dom.overlayNote.textContent =
+    game.best === game.score ? 'New personal best' : `Best ${game.best.toLocaleString()}`;
+  dom.keepGoing.hidden = !canRescue(game);
+  if (!dom.keepGoing.hidden) {
+    dom.keepGoing.textContent = left === 1 ? 'Keep going · 1 left' : `Keep going · ${left} left`;
+  }
   dom.overlay.hidden = false;
 }
 
@@ -109,6 +124,21 @@ function newGame() {
   renderer.renderTray(game.tray);
   paintHud(false);
   persist();
+}
+
+/**
+ * Spends a rescue on a tray that cannot be played. The board and score are left
+ * alone, so the run simply carries on; if the fresh tray is dead too the card
+ * stays up with one fewer rescue on it.
+ */
+function keepGoing() {
+  if (busy || !rescueTray(game)) return;
+  renderer.display(game.board);
+  renderer.renderTray(game.tray);
+  paintHud(false);
+  persist();
+  if (isGameOver(game)) showOverlay();
+  else hideOverlay();
 }
 
 function onPlace(slot, originX, originY) {
@@ -181,6 +211,8 @@ dom.newGame.addEventListener('click', () => {
   drag.cancel();
   newGame();
 });
+
+dom.keepGoing.addEventListener('click', keepGoing);
 
 dom.themeToggle.addEventListener('click', cycleTheme);
 

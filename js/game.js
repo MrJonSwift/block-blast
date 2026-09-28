@@ -2,6 +2,14 @@ export const GRID = 8;
 export const TRAY_SIZE = 3;
 export const SAVE_VERSION = 1;
 
+/**
+ * How many times a stuck tray can be re-dealt before the run is over for good.
+ * This is the only thing standing between the player and an unlimited reroll of
+ * a bad hand, which is why it is capped rather than unlimited. It costs nothing
+ * in score: the run carries on, and the best is still the best.
+ */
+export const MAX_RESCUES = 3;
+
 /** Shapes are authored as ASCII art, then normalised into unique variants. */
 const SHAPE_DEFS = [
   ['dot', ['#']],
@@ -242,6 +250,7 @@ export function createGame(seed = (Math.random() * 0xffffffff) >>> 0) {
     score: 0,
     moves: 0,
     best: 0,
+    rescues: 0,
     seed: seed >>> 0,
     draws: 0,
   };
@@ -296,6 +305,28 @@ export function anyTrayPlacement(game) {
 
 export function isGameOver(game) {
   return !anyTrayPlacement(game);
+}
+
+/**
+ * Whether the player may re-deal a tray that cannot be played. Only offered
+ * when the game is actually over, so it can never be used to pick a better
+ * hand off a live board.
+ */
+export function canRescue(game) {
+  return game.rescues < MAX_RESCUES && isGameOver(game);
+}
+
+/**
+ * Re-deals the tray after a dead end, spending one rescue. Returns false if the
+ * game is not over or there are none left, so the caller can trust the result.
+ * The new pieces come from the seeded RNG like any other deal, which is what
+ * keeps a restored game replaying identically.
+ */
+export function rescueTray(game) {
+  if (!canRescue(game)) return false;
+  game.rescues += 1;
+  dealTray(game);
+  return true;
 }
 
 /** Rows/cols that are completely filled on `board`. Exported for tests. */
@@ -396,6 +427,7 @@ export function serialize(game) {
     score: game.score,
     moves: game.moves,
     best: game.best,
+    rescues: game.rescues,
     seed: game.seed,
     draws: game.draws,
   };
@@ -427,6 +459,9 @@ export function deserialize(data) {
   }
   const board = Uint8Array.from(data.board);
 
+  const safeCount = (value) =>
+    Number.isInteger(value) && value >= 0 ? Math.min(value, MAX_RESCUES) : 0;
+
   return {
     version: SAVE_VERSION,
     board,
@@ -434,6 +469,8 @@ export function deserialize(data) {
     score: Number.isInteger(data.score) && data.score >= 0 ? data.score : 0,
     moves: Number.isInteger(data.moves) && data.moves >= 0 ? data.moves : 0,
     best: Number.isInteger(data.best) && data.best >= 0 ? data.best : 0,
+    // Absent in saves written before rescues existed, which read as none used.
+    rescues: safeCount(data.rescues),
     seed: data.seed >>> 0,
     draws: data.draws,
   };

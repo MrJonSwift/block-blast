@@ -394,6 +394,23 @@ body {
   transform: scale(0.98);
 }
 
+.card-actions {
+  display: grid;
+  gap: 8px;
+}
+
+/* The safe option sits behind the one the player probably wants, so it is the
+   outline one and "keep going" keeps the accent. */
+.button-quiet {
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--line);
+}
+
+.button[hidden] {
+  display: none;
+}
+
 /* ---------- Install hint ---------- */
 
 .install {

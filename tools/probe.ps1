@@ -71,12 +71,22 @@ try {
       $w = $size[0]
       $h = $size[1]
       $dom = & $chrome --headless=new --disable-gpu --hide-scrollbars --window-size=1400,1400 `
-        --virtual-time-budget=40000 --dump-dom "$base/tests/probe.html?w=$w&h=$h" 2>$null | Out-String
+        --virtual-time-budget=180000 --dump-dom "$base/tests/probe.html?w=$w&h=$h" 2>$null | Out-String
       if ($dom -match '(?s)<pre id="report">(.*?)</pre>') {
         $report = $matches[1]
         $checks = ([regex]::Matches($report, '(?m)^(PASS|FAIL)')).Count
         $names = @()
         foreach ($m in [regex]::Matches($report, '(?m)^FAIL\s+(.+?)\s*\[')) { $names += $m.Groups[1].Value }
+        # The harness always ends with "ALL PASS" or "N FAILURE(S)". Without
+        # that line it was cut short, or died before it could run, and a partial
+        # report must never be reported as a pass.
+        $finished = $report -match '(?m)^(ALL PASS|\d+ FAILURE\(S\))$'
+        if ($checks -eq 0 -or -not $finished) {
+          $failed += 1
+          $why = if ($checks -eq 0) { 'harness produced no checks' } else { "run stopped after $checks checks" }
+          Write-Host ("FAIL pass {0} {1,4}x{2,-5} {3}" -f $pass, $w, $h, $why)
+          continue
+        }
         $failed += $names.Count
         $status = if ($names.Count -eq 0) { 'ok  ' } else { 'FAIL' }
         Write-Host ("{0} pass {1} {2,4}x{3,-5} {4,2} checks  {5}" -f $status, $pass, $w, $h, $checks, ($names -join '; '))

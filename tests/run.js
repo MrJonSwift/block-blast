@@ -3,12 +3,14 @@ import { LIFT_CELLS, ghostOffset } from '../js/input.js';
 import {
   COLORS,
   GRID,
+  MAX_RESCUES,
   SHAPES,
   SHAPE_COUNT,
   STAGE_COUNT,
   STAGE_SHAPES,
   TRAY_SIZE,
   anyTrayPlacement,
+  canRescue,
   clearedLines,
   createPlayableGame,
   dealTray,
@@ -18,6 +20,7 @@ import {
   isGameOver,
   placePiece,
   previewPlacement,
+  rescueTray,
   scoreForPlacement,
   serialize,
   stageFor,
@@ -513,6 +516,100 @@ test('a stage boundary survives a save and restore', () => {
     assert.deepEqual(dealTray(copy), dealTray(game), `mismatch at ${moves} moves`);
     assert.deepEqual(serialize(copy), serialize(game));
   }
+});
+
+test('a dead tray can be re-dealt three times, and no more', () => {
+  // A board full but for the diagonal: nothing two cells or bigger can fit, and
+  // the tray is loaded with pieces that need it.
+  const game = boardWithGaps(diagonalGaps());
+  const big = SHAPES.find((s) => s.cells.length === 5 && s.width === 5);
+  game.tray = [0, 1, 2].map(() => ({ shapeId: big.id, colorIndex: 0 }));
+  assert.equal(isGameOver(game), true, 'fixture is a dead end');
+  assert.equal(canRescue(game), true);
+
+  const board = Array.from(game.board);
+  const score = game.score;
+  const rescues = MAX_RESCUES;
+  for (let attempt = 1; attempt <= MAX_RESCUES; attempt++) {
+    assert.equal(rescueTray(game), true, `rescue ${attempt} refused`);
+    assert.equal(game.rescues, attempt, 'rescues counted');
+    assert.deepEqual(Array.from(game.board), board, 'the board is untouched');
+    assert.equal(game.score, score, 'the score is untouched');
+    assert.equal(game.tray.length, TRAY_SIZE);
+    for (const piece of game.tray) assert.ok(piece !== null, 'the tray is full again');
+  }
+  assert.equal(game.rescues, rescues, 'no more than the limit');
+  assert.equal(canRescue(game), false, 'the offer is withdrawn');
+  assert.equal(rescueTray(game), false, 'a fourth rescue is refused');
+  assert.equal(game.rescues, rescues, 'and it does not count');
+});
+
+test('a rescue is only offered on a tray that cannot be played', () => {
+  const game = createPlayableGame(7);
+  assert.equal(isGameOver(game), false, 'a fresh tray can be played');
+  assert.equal(canRescue(game), false, 'so no rescue is offered');
+  assert.equal(rescueTray(game), false, 'and it cannot be taken');
+  assert.equal(game.rescues, 0);
+
+  // Nor may it be used to pick a better hand off a live board, which is the
+  // whole reason the offer is tied to being stuck.
+  const oneSlot = boardWithGaps(diagonalGaps());
+  const single = SHAPES.find((s) => s.cells.length === 1);
+  oneSlot.tray = [{ shapeId: single.id, colorIndex: 0 }, null, null];
+  assert.equal(isGameOver(oneSlot), false, 'one playable piece is enough');
+  assert.equal(canRescue(oneSlot), false);
+  assert.equal(rescueTray(oneSlot), false);
+  assert.equal(oneSlot.tray[0].shapeId, single.id, 'the tray is left alone');
+});
+
+test('a rescued tray is as deterministic as any other deal', () => {
+  const build = () => {
+    const game = boardWithGaps(diagonalGaps());
+    const big = SHAPES.find((s) => s.cells.length === 5 && s.width === 5);
+    game.tray = [0, 1, 2].map(() => ({ shapeId: big.id, colorIndex: 0 }));
+    return game;
+  };
+  const a = build();
+  const b = build();
+  a.seed = 4242;
+  b.seed = 4242;
+  assert.equal(rescueTray(a), true);
+  assert.equal(rescueTray(b), true);
+  assert.deepEqual(a.tray, b.tray);
+
+  // And it survives a restore mid-way, so a reloaded app deals the same again.
+  const c = deserialize(JSON.parse(JSON.stringify(serialize(a))));
+  const before = serialize(c);
+  rescueTray(c);
+  const d = deserialize(JSON.parse(JSON.stringify(serialize(a))));
+  rescueTray(d);
+  assert.deepEqual(serialize(c), serialize(d));
+  assert.notDeepEqual(serialize(c), before, 'the rescue really changed the tray');
+});
+
+test('rescues round-trip through the save, and old saves read as none', () => {
+  const game = createPlayableGame(11);
+  game.rescues = 2;
+  assert.equal(deserialize(serialize(game)).rescues, 2);
+  // A save written before rescues existed has no such field.
+  const legacy = JSON.parse(JSON.stringify(serialize(game)));
+  delete legacy.rescues;
+  assert.equal(deserialize(legacy).rescues, 0);
+  for (const bad of [-1, 1.5, '2', null, 99]) {
+    const save = JSON.parse(JSON.stringify(serialize(game)));
+    save.rescues = bad;
+    const restored = deserialize(save);
+    assert.ok(restored, 'a bad rescue count must not lose the save');
+    assert.ok(restored.rescues >= 0 && restored.rescues <= MAX_RESCUES, `rescues=${restored.rescues}`);
+  }
+});
+
+test('a new game starts with its rescues back', () => {
+  const game = createPlayableGame(3);
+  game.rescues = MAX_RESCUES;
+  const fresh = createPlayableGame(3);
+  assert.equal(fresh.rescues, 0);
+  assert.equal(serialize(fresh).rescues, 0);
 });
 
 test('a full random game never produces an impossible state', () => {
