@@ -24,14 +24,27 @@ tab needs a connection.
   the rows and columns that will clear.
 - Score: +1 per block, +10 per line cleared, plus a combo bonus of 18/36/54/72
   for clearing 2/3/4/5+ lines at once.
-- The game ends when no remaining piece fits anywhere. If that happens you get
-  three **Keep going** chances to re-deal the tray, so one awkward piece does not
-  have to end a run. It costs no score, and it is only ever offered on a tray
-  that cannot be played, so it cannot be used to reroll for a better hand.
-- Difficulty builds over a run rather than starting hard. The first pieces are
-  single cells, dominoes, 3-bars, 2×2 squares and L's; the awkward shapes — 5-bars,
-  6-cell L's, F and Y pieces — only turn up once you are well into the game. A
-  new stage says so once, in a brief toast, and that is the only mention.
+- The game ends when no remaining piece fits anywhere. When that happens the card
+  offers to **use a refresh** — a fresh tray, board and score untouched — up to
+  three times per run. Three is the point: a run that could go on for ever has no
+  natural place to stop, so the chances are what make a session finish. It is
+  only ever offered on a tray that cannot be played, so it cannot be used to
+  reroll for a better hand.
+- **The pieces are the easy half and the board is the hard half.** Nothing in the
+  game is more than five cells, and the opening pool of 28 shapes is all bars,
+  squares and small corner shapes — enough that you never see the same tray
+  twice, and none of it able to end a run on its own. Each tray is dealt as a
+  unit rather than rolled three times: you never get two of the same shape
+  family, and at most one piece of five cells.
+- **Difficulty breathes, and it watches how you are doing.** The ramp unlocks
+  bigger shapes when you have cleared lines, not when time has passed, so a
+  rough patch never arrives with harder pieces on top of it. Separately, the
+  size of the pieces follows two things: how full the board is, and how many
+  placements it has been since you last cleared a line. Six placements with
+  nothing cleared and the next tray is small pieces; a clear on a roomy board
+  and the next tray is generous again. If you go a couple of placements without a
+  clear, the next tray is also guaranteed to contain a piece that completes a
+  line wherever one is available.
 - Theme follows the system setting and can be overridden with the toggle in the
   top right.
 
@@ -54,11 +67,17 @@ Two details worth knowing if you change this code:
 - **`measure()` never writes styles.** The board is sized from the space left
   over by the tray, so resizing tray pieces mid-drag used to reflow the board
   and shift the snap by a cell. `sizePieces()` is a separate step.
-- **Shapes are dealt from a stage, not from the whole set.** `STAGES` in
-  `js/game.js` lists shape *families* per stage, and each stage's pool contains
-  the previous one's, so a shape you have never seen is never harder than the
-  ones you know. The stage comes from pieces placed, not score, so playing well
-  does not raise the stakes.
+- **Shapes are dealt from a stage, and a stage is a superset of the last.** The
+  stage comes from lines cleared, not pieces placed and not score, so playing well
+  opens things up rather than raising the stakes, and a player who is struggling
+  stays in the friendly pool. `sizeCap()` in `js/game.js` is the other half of
+  the ramp and reacts to how full the board is and how long it has been since a
+  clear.
+- **A whole tray is dealt at once, from one seeded roll.** `dealTray()` composes
+  the three pieces against the board as it stands, so it can promise that every
+  one of them fits, and that after a dry spell one of them will complete a line.
+  It is a function of the seed, the tray index, `lines`, `sinceClear` and the
+  board — all saved — so a reloaded app deals the same trays again.
 - **The dragged piece is held clear of the finger**, two cells away from it, so
   your hand does not cover the piece you are placing. The tray decides which
   way: up in portrait, where the tray is below the board, and out to the left in

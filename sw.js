@@ -1,6 +1,6 @@
 // Bump this on every deploy: it invalidates the old cache and, with
 // skipWaiting + clients.claim, lets the new worker take over on the next load.
-const CACHE = 'blockblast-v5';
+const CACHE = 'blockblast-v7';
 
 const SHELL = [
   './',

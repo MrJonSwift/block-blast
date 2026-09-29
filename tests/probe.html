@@ -20,7 +20,7 @@
   <body>
     <pre id="report">running</pre>
     <script type="module">
-      import { SHAPES, fitsAt } from '/js/game.js';
+      import { SHAPES, SAVE_VERSION, fitsAt } from '/js/game.js';
       import { LIFT_CELLS, ghostOffset } from '/js/input.js';
 
       // The app is driven inside a fixed-size iframe so the layout is measured
@@ -660,6 +660,7 @@
         const deadBoard = [];
         for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) deadBoard.push(x === y ? 0 : 1);
         const bar = SHAPES.find((s) => s.cells.length === 5 && s.width === 5);
+        if (!bar) throw new Error('the catalogue has no 5-cell bar to make a dead end with');
         const fits = (board, tray) =>
           tray.some((piece) => {
             for (let y = 0; y < 8; y++) {
@@ -669,7 +670,7 @@
           });
         const deadTray = [0, 1, 2].map(() => ({ shapeId: bar.id, colorIndex: 0 }));
         const craftSave = (rescues) => ({
-          version: 1,
+          version: SAVE_VERSION,
           board: deadBoard,
           tray: deadTray,
           score: 1234,
@@ -680,11 +681,17 @@
           draws: 20,
         });
         if (!(await loadWithSave(craftSave(0), '?v=3'))) throw new Error('app never reloaded the stuck save');
-        check('a stuck game opens on the game over card', app.doc.getElementById('overlay').hidden === false);
+        check('a stuck game opens the card', app.doc.getElementById('overlay').hidden === false);
         check('the board is the crafted dead end', app.blocks() === 56, `${app.blocks()}`);
         const keepButton = () => app.doc.getElementById('keep-going');
-        check('keep going is offered on a stuck tray', keepButton().hidden === false, keepButton().textContent);
-        check('the offer says how many are left', keepButton().textContent.includes('3 left'), keepButton().textContent);
+        const cardTitle = () => app.doc.getElementById('overlay-title').textContent;
+        // The word "Game over" used to be in the markup unconditionally, so it
+        // was on screen even with three refreshes still available.
+        check('a refreshable tray is not called game over', cardTitle() === 'Out of room', cardTitle());
+        check('a refresh is offered on a stuck tray', keepButton().hidden === false, keepButton().textContent);
+        check('the refresh says how many are left', keepButton().textContent.includes('3 left'), keepButton().textContent);
+        check('the score is labelled, not bare', app.doc.querySelector('.card-score-label')?.textContent === 'Score');
+        check('the other option is to start again', app.doc.getElementById('new-game').textContent === 'Start again');
         check('the score is shown, not changed', app.score() === 1234, String(app.score()));
 
         const spendRescue = async (wantRescues) => {
@@ -714,10 +721,12 @@
         await spendRescue(3);
 
         // And a run that has spent them all is offered nothing, even though it
-        // is still stuck.
+        // is still stuck. This is the one state that really is the end, so the
+        // card says the run is complete rather than that it is over.
         if (!(await loadWithSave(craftSave(3), '?v=5'))) throw new Error('app never reloaded');
         check('a spent run still shows the card', app.doc.getElementById('overlay').hidden === false);
-        check('a spent run is offered no rescue', keepButton().hidden === true, keepButton().textContent);
+        check('a spent run is offered no refresh', keepButton().hidden === true, keepButton().textContent);
+        check('a spent run reads as a completed run', cardTitle() === 'Run complete', cardTitle());
         check('the score is still the run score', app.score() === 1234, String(app.score()));
 
         if (!(await loadApp('?v=6'))) throw new Error('app never reloaded after a rescue');

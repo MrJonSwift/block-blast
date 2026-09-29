@@ -1,6 +1,13 @@
 export const GRID = 8;
 export const TRAY_SIZE = 3;
-export const SAVE_VERSION = 1;
+
+/**
+ * Bumped to 2 when the shape catalogue was replaced. Shape ids are indexes into
+ * the flattened shape table, so every id in a v1 save means a different shape
+ * now — a v1 save is discarded and a new run starts rather than restoring a
+ * board built out of pieces the game no longer deals.
+ */
+export const SAVE_VERSION = 2;
 
 /**
  * How many times a stuck tray can be re-dealt before the run is over for good.
@@ -10,63 +17,54 @@ export const SAVE_VERSION = 1;
  */
 export const MAX_RESCUES = 3;
 
-/** Shapes are authored as ASCII art, then normalised into unique variants. */
+/**
+ * Shapes are authored as ASCII art, one entry per *family*, and expanded into
+ * every distinct rotation and reflection of it. Each variant is then dealt as
+ * its own fixed shape: the app never rotates a piece at runtime, so the tray
+ * always shows the orientation the player is about to place.
+ *
+ * The catalogue is deliberately small and nothing is longer than 5 cells. The
+ * earlier set was 72 variants, and what made it feel bad was not the variety —
+ * it was that awkward shapes (a 3x3, 6-cell rectangles, a 6-cell L, F, Y, the
+ * plus and a diagonal Z-staircase) arrived in the same pool as the friendly ones
+ * and a tray could hold three of them. There is no size-based difficulty here;
+ * the board getting full is the difficulty, and the pool is chosen so that a
+ * shape you have not seen before is never worse than the ones you know.
+ *
+ * Tier 0 is the whole opening experience: all seven tetrominoes (I, O, T, L and
+ * J, S and Z), the shorter bars, the 2x2 and the L-tromino, which is 28 variants
+ * of nothing harder than four cells. The 5-cell pieces arrive much later. A
+ * shape is only as hard as the pocket it goes in, so a piece that has a legal
+ * placement is always a piece the player can at least see the place for.
+ *
+ * `u5` is here rather than in tier 0 because the smallest U is five cells —
+ * there is no 4-cell U, and the art that looks like one is the L-tetromino, so
+ * naming it `u4` would have claimed a family name for a shape already in the
+ * set. Tier boundaries are `0 / 45 / 150` pieces placed.
+ */
 const SHAPE_DEFS = [
   ['dot', ['#']],
 
   ['h2', ['##']],
-  ['v2', ['#', '#']],
 
   ['h3', ['###']],
-  ['v3', ['#', '#', '#']],
 
   ['h4', ['####']],
-  ['v4', ['#', '#', '#', '#']],
 
   ['h5', ['#####']],
-  ['v5', ['#', '#', '#', '#', '#']],
 
   ['o2', ['##', '##']],
-  ['o3', ['###', '###', '###']],
 
-  ['r2x3', ['##.', '###']],
-  ['r3x2', ['###', '#..']],
-  ['r3x2b', ['###', '..#']],
-  ['r2x3b', ['###', '.##']],
+  ['l3', ['##', '#.']],
+  ['l4', ['#..', '###']],
+  ['l5', ['#...', '####']],
 
-  ['l3', ['#..', '###']],
-  ['l3b', ['..#', '###']],
-  ['l3c', ['###', '#..']],
-  ['l3d', ['###', '..#']],
-  ['l4', ['#...', '####']],
-  ['l4b', ['...#', '####']],
-  ['l4c', ['####', '#...']],
-  ['l4d', ['####', '...#']],
-  ['l5', ['#....', '#####']],
-  ['l5b', ['....#', '#####']],
-  ['l5c', ['#####', '#....']],
-  ['l5d', ['#####', '....#']],
+  ['s4', ['.##', '##.']],
 
-  ['s3', ['.##', '##.']],
-  ['s3v', ['#.', '##', '.#']],
+  ['t4', ['###', '.#.']],
+  ['t5', ['###', '.#.', '.#.']],
 
-  ['t3', ['###', '.#.']],
-  ['t3v', ['.#.', '##', '.#.']],
-
-  ['u3', ['#.#', '###']],
-  ['u3v', ['###', '#.#']],
-
-  ['z4', ['##..', '.##.']],
-  ['z4v', ['.#..', '##..', '..##']],
-
-  ['f4', ['.##', '##.', '#..']],
-  ['f4b', ['..#', '.##', '##.']],
-  ['f5', ['.##', '##.', '#...']],
-  ['f5b', ['...#', '.##', '##.']],
-
-  ['y5', ['#.#', '###']],
-  ['y5v', ['.#.', '##', '.#', '.#']],
-  ['plus5', ['.#.', '###', '.#.']],
+  ['u5', ['#.#', '###']],
 ];
 
 /** Block colours, indexed 0-based. 0 doubles as "empty" in the board array. */
@@ -100,6 +98,20 @@ function keyOf(cells) {
     .join(' ');
 }
 
+/** The seeds of a family's full orbit: four rotations, each also mirrored. */
+function orbitSeeds(seed) {
+  const mirrored = mirror(seed);
+  const seeds = [];
+  for (const base of [seed, mirrored]) {
+    let cells = base;
+    for (let turn = 0; turn < 4; turn++) {
+      seeds.push(normalise(cells));
+      cells = rotate90(cells);
+    }
+  }
+  return seeds;
+}
+
 function normalise(cells) {
   const minX = Math.min(...cells.map((c) => c[0]));
   const minY = Math.min(...cells.map((c) => c[1]));
@@ -114,20 +126,29 @@ function mirror(cells) {
   return cells.map(([x, y]) => [-x, y]);
 }
 
+/**
+ * Expands every family into its full orbit of distinct orientations.
+ *
+ * This used to try only four transforms (the seed, one rotation, and the two
+ * mirrorings of those), which silently lost orientations: the L-tromino and
+ * L-tetromino came out as 4 of their 8, so the game contained no J shapes at
+ * all, and the U and T lost one each. The mirror of a piece is only a *new*
+ * piece if the piece is chiral, so a family has to be rotated all the way round
+ * to be sure of what it expands to. `tests/run.js` pins the result.
+ */
 function buildShapes() {
   const seen = new Set();
   const families = [];
-  SHAPE_DEFS.forEach(([name, rows], defIndex) => {
-    const seed = normalise(variantsOf(rows).cells);
-    const family = [seed, rotate90(seed), mirror(seed), mirror(rotate90(seed))];
+  SHAPE_DEFS.forEach(([name, rows]) => {
     const variants = [];
-    for (const candidate of family) {
-      const cells = normalise(candidate);
+    for (const cells of orbitSeeds(normalise(variantsOf(rows).cells))) {
       const key = keyOf(cells);
       if (seen.has(key)) continue;
       seen.add(key);
       variants.push({
-        defIndex,
+        // The family is what the tray caps work on, so two L's of different
+        // orientations still count as two of the same family.
+        family: name,
         cells,
         width: Math.max(...cells.map((c) => c[0])) + 1,
         height: Math.max(...cells.map((c) => c[1])) + 1,
@@ -149,38 +170,40 @@ export const SHAPES = SHAPE_FAMILIES.flatMap((family) => family.variants);
 export const SHAPE_COUNT = SHAPES.length;
 
 /**
- * Difficulty is a property of the stage, not of the individual shape: every
- * shape in a stage is about equally easy, and each stage's pool contains the
- * previous one's, so a shape you have never seen before is never *worse* than
- * the ones you know. The awkward shapes are the long ones — 5-bars, 4-arm and
- * 6-cell L's, F and Y pieces — and they are all in the last stage.
+ * Which shapes exist yet, and how big they are allowed to be.
  *
- * The stage advances on pieces placed rather than score. Score is dominated by
- * line clears, so gating on it would make playing well raise the stakes, and one
- * lucky double-clear would jump a stage mid-run. Pieces placed advance evenly,
- * and `moves` is already part of the save, so a restored game resumes at the
- * right stage with no change to the save format.
+ * **The stage advances on success, not on time.** The trigger is total lines
+ * cleared, so a player who is struggling stays in the friendly tier instead of
+ * being handed harder pieces at the exact moment they are struggling, and a
+ * player who is clearing regularly unlocks everything early. This is the
+ * reverse of the usual argument, which is that gating on score is bad because
+ * playing well would raise the stakes. That argument is right for a game about a
+ * high score. Here playing well is meant to open things up, not tighten them.
+ *
+ * It is lines cleared rather than score, because `scoreForPlacement` pays a
+ * point per block: a player grinding out 1x1s racks up a score without ever
+ * clearing anything, which is the opposite signal.
+ *
+ * **The board getting full is the other half of the curve.** `sizeCap` below
+ * reads how full the board is, and that is the felt difficulty. Because both
+ * terms are a function of saved state, a restored game resumes at the right
+ * stage and deals the same trays again.
  */
 const STAGES = [
   {
     at: 0,
     name: 'Warming up',
-    add: ['dot', 'h2', 'h3', 'o2', 'l3'],
+    add: ['dot', 'h2', 'h3', 'h4', 'o2', 'l3', 'l4', 's4', 't4'],
   },
   {
-    at: 9,
-    name: 'Steady',
-    add: ['h4', 'r3x2', 'r3x2b', 's3', 't3', 't3v'],
+    at: 20,
+    name: 'Full deck',
+    add: ['h5', 'u5'],
   },
   {
-    at: 24,
-    name: 'Stretching',
-    add: ['r2x3', 'r2x3b', 'u3', 'u3v', 'z4v', 'l4', 'l4b', 'l4c', 'plus5'],
-  },
-  {
-    at: 45,
-    name: 'All of it',
-    add: ['h5', 'l5', 'l5b', 'l5c', 'f4', 'f4b', 'f5b', 'y5v', 'o3'],
+    at: 60,
+    name: 'Deep deck',
+    add: ['t5', 'l5'],
   },
 ];
 
@@ -207,39 +230,88 @@ const STAGE_POOLS = (() => {
 export const STAGE_SHAPES = STAGE_POOLS;
 export const STAGE_COUNT = STAGES.length;
 
-/** The stage index for a run that has placed `moves` pieces. */
-export function stageFor(moves) {
+/**
+ * The stage a run is in, from the number of lines cleared so far. Each stage's
+ * pool is a superset of the last, so a shape you have never seen is never worse
+ * than the ones you know.
+ */
+export function stageFor(lines) {
   let index = 0;
   for (let i = 0; i < STAGES.length; i++) {
-    if (moves >= STAGES[i].at) index = i;
+    if (lines >= STAGES[i].at) index = i;
   }
   return index;
 }
 
-export function stageNameFor(moves) {
-  return STAGES[stageFor(moves)].name;
+export function stageNameFor(lines) {
+  return STAGES[stageFor(lines)].name;
 }
 
 export function createRng(seed) {
   let state = seed >>> 0;
-  const rng = () => {
+  return () => {
     state = (state + 0x6d2b79f5) >>> 0;
     let t = state;
     t = Math.imul(t ^ (t >>> 15), t | 1);
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
-  rng.getState = () => state;
-  rng.setState = (next) => {
-    state = next >>> 0;
-  };
-  return rng;
 }
 
-function rngSeedFromDraws(seed, draws) {
-  const rng = createRng(seed);
-  for (let i = 0; i < draws; i++) rng();
-  return rng.getState();
+/**
+ * How full the board is, 0..1. This is the game's difficulty curve. A crowded
+ * board is the hard part, so the deal reacts to it: a roomy board gets the big
+ * friendly pieces, a tight one gets small slot-fillers. Measured after a clear,
+ * so a good clear buys bigger pieces straight back.
+ */
+export function boardPressure(board) {
+  let filled = 0;
+  for (let i = 0; i < board.length; i++) if (board[i]) filled += 1;
+  return filled / (GRID * GRID);
+}
+
+/**
+ * How big a piece is allowed to be right now.
+ *
+ * Two inputs, and the second is the one that matters. `pressure` is how full the
+ * board is, which is the difficulty everyone feels. `sinceClear` is how many
+ * pieces have been placed since the last line cleared, which is how the run is
+ * *going* — and a board can be roomy while the player is stuck, or tight while
+ * they are in a rhythm, so the two are not the same signal.
+ *
+ * The `sinceClear` term is what makes the ramp breathe in both directions: two
+ * notches smaller after six placements with nothing cleared, a notch larger when
+ * the player has just cleared on a roomy board. It replaces a `sin(moves/12)`
+ * term that could not do this — a clock does not know how anyone is doing — and
+ * which, being consulted only in stage 0, was dead code for most of a run.
+ */
+function sizeCap(stage, pressure, sinceClear) {
+  let cap;
+  if (stage === 0) {
+    if (pressure < 0.3) cap = 4;
+    else if (pressure < 0.5) cap = 3;
+    else cap = 2;
+  } else if (pressure < 0.35) {
+    cap = 5;
+  } else if (pressure < 0.6) {
+    cap = 4;
+  } else if (pressure < 0.75) {
+    cap = 3;
+  } else {
+    cap = 2;
+  }
+  if (sinceClear >= 6) cap -= 2;
+  else if (sinceClear >= 3) cap -= 1;
+  else if (sinceClear === 0 && pressure < 0.4) cap += 1;
+  return Math.max(1, Math.min(5, cap));
+}
+
+/** Mixes the run seed with a tray index into a well-spread seed. */
+function traySeed(seed, trayIndex) {
+  let h = (seed ^ Math.imul(trayIndex + 1, 0x9e3779b9)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x85ebca6b) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
 }
 
 export function createGame(seed = (Math.random() * 0xffffffff) >>> 0) {
@@ -249,6 +321,12 @@ export function createGame(seed = (Math.random() * 0xffffffff) >>> 0) {
     tray: new Array(TRAY_SIZE).fill(null),
     score: 0,
     moves: 0,
+    // Total lines cleared: what the difficulty ramp is keyed on, because it
+    // measures success rather than survival.
+    lines: 0,
+    // Placements since the last line cleared. Zero means the player is in a
+    // rhythm, which is the signal that buys them bigger pieces back.
+    sinceClear: 0,
     best: 0,
     rescues: 0,
     seed: seed >>> 0,
@@ -262,16 +340,162 @@ export function createPlayableGame(seed) {
   return game;
 }
 
-function dealPiece(game) {
-  game.draws += 1;
-  const rng = createRng(rngSeedFromDraws(game.seed, game.draws - 1));
-  const pool = STAGE_POOLS[stageFor(game.moves)];
-  const shape = SHAPES[pool[Math.floor(rng() * pool.length)]];
-  return { shapeId: shape.id, colorIndex: Math.floor(rng() * COLORS.length) };
+/**
+ * Which shapes in `pool` have a placement that completes a row or a column on
+ * `board`, as a Set of shape ids.
+ *
+ * This is the fix for the one thing that made the game feel like work: only 30%
+ * of trays used to contain a piece that cleared a line *right now*, so seven
+ * trays in ten handed over nothing to do but set up. A tray that always carries a
+ * clear is a tray that always carries a small win.
+ *
+ * The row and column fill counts are built once and the piece's own cells are
+ * tallied per origin, so this is one pass over the pool rather than a full board
+ * copy per candidate. Measured at 109–254 microseconds per deal, against 7–23
+ * before this scan existed — about ten times the rest of a deal, and still
+ * nothing: a deal happens once every three placements, so it is well under a
+ * millisecond against a move the player takes a second over.
+ */
+function clearingShapes(board, pool) {
+  const rowFill = new Int8Array(GRID);
+  const colFill = new Int8Array(GRID);
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      if (board[y * GRID + x]) {
+        rowFill[y] += 1;
+        colFill[x] += 1;
+      }
+    }
+  }
+
+  const result = new Set();
+  const inRow = new Int8Array(GRID);
+  const inCol = new Int8Array(GRID);
+  for (const id of pool) {
+    const shape = SHAPES[id];
+    for (let oy = 0; oy + shape.height <= GRID; oy++) {
+      for (let ox = 0; ox + shape.width <= GRID; ox++) {
+        inRow.fill(0);
+        inCol.fill(0);
+        let fits = true;
+        for (const [dx, dy] of shape.cells) {
+          const x = ox + dx;
+          const y = oy + dy;
+          if (board[y * GRID + x]) {
+            fits = false;
+            break;
+          }
+          inRow[y] += 1;
+          inCol[x] += 1;
+        }
+        if (!fits) continue;
+        for (let i = 0; i < GRID; i++) {
+          if (inRow[i] && rowFill[i] + inRow[i] === GRID) {
+            result.add(id);
+            break;
+          }
+          if (inCol[i] && colFill[i] + inCol[i] === GRID) {
+            result.add(id);
+            break;
+          }
+        }
+      }
+    }
+  }
+  return result;
 }
 
+/**
+ * Whether a shape may join the tray being dealt, at how far the rules have been
+ * relaxed to get a tray at all. The order matters. The clear guarantee goes
+ * first, because a tray with nothing to clear is the dry spell this game exists
+ * to avoid. Fitting on the board is the last thing given up, because a piece you
+ * cannot place is a piece the player cannot act on, while two L's in one tray is
+ * only a matter of taste.
+ */
+function pieceAllowed(shape, level, rules) {
+  if (level < 4 && rules.wantsClear && rules.slot === rules.clearSlot && !rules.clearing.has(shape.id)) {
+    return false;
+  }
+  if (level < 1 && rules.families.has(shape.family)) return false;
+  if (level < 2) {
+    if (rules.fives >= 1 && shape.cells.length >= 5) return false;
+    if (rules.bigs >= rules.bigLimit && shape.cells.length >= 4) return false;
+  }
+  if (level < 3 && shape.cells.length > rules.cap) return false;
+  if (level < 4 && !rules.fits(shape.id)) return false;
+  return true;
+}
+
+/** The levels at which a tray will settle, tightest first. */
+const RELAXATIONS = 5;
+
+/**
+ * Deals a whole tray at once, rather than three independent draws.
+ *
+ * The three pieces used to be rolled separately and uniformly from the stage
+ * pool, which left nothing in charge of what a tray contained: 73% of late trays
+ * held two or more pieces of five cells or more and a quarter held three. A tray
+ * is the unit the player is actually given, so it is the unit that is composed.
+ *
+ * Two guarantees hold, in this order of importance. Wherever the board allows a
+ * line to be completed, at least one slot is required to take a piece that
+ * completes one. And every piece dealt has a legal placement on the board as it
+ * stands. The second is not a proof that all three can be played in some order —
+ * that needs a search far too deep to run on a phone — but it does mean a tray is
+ * never dealt that cannot be placed at all.
+ *
+ * The whole thing is a function of the seed, the tray index, `lines`,
+ * `sinceClear` and the board, all of which are saved, so a reloaded app deals
+ * the same trays again and a refresh re-deals identically.
+ */
 export function dealTray(game) {
-  for (let i = 0; i < TRAY_SIZE; i++) game.tray[i] = dealPiece(game);
+  const trayIndex = Math.floor(game.draws / TRAY_SIZE);
+  const rng = createRng(traySeed(game.seed, trayIndex));
+  const stage = stageFor(game.lines);
+  const pool = STAGE_POOLS[stage];
+  const clearing = clearingShapes(game.board, pool);
+  const rules = {
+    cap: sizeCap(stage, boardPressure(game.board), game.sinceClear),
+    clearing,
+    // The guarantee is relief, not the default. Offering a clear on every tray
+    // pushed the median run from 49 trays to 184 and the 90th percentile to 481,
+    // which is not a calm game, it is an endless sandbox with no natural point to
+    // stop at. It fires only once the player is actually in a dry spell, which is
+    // the whole point of it: the tray is easy *because* they have just had a hard
+    // moment, and the rest of the time the deck stays varied.
+    //
+    // An empty board has nothing to complete and an early run is mostly empty
+    // boards, so `clearing` being empty skips the constraint rather than forcing
+    // five empty filter passes on every slot of every early tray.
+    wantsClear: clearing.size > 0 && game.sinceClear >= 2,
+    clearSlot: 0,
+    slot: 0,
+    families: new Set(),
+    fives: 0,
+    bigs: 0,
+    // Two four-cell pieces in a tray is a real decision; three is a wall.
+    bigLimit: stage === 0 ? 1 : 2,
+    fits: (id) => hasAnyPlacement(game, id),
+  };
+  // Rolled before the pieces so the clear is not always the first one shown.
+  rules.clearSlot = Math.floor(rng() * TRAY_SIZE);
+
+  for (let slot = 0; slot < TRAY_SIZE; slot++) {
+    rules.slot = slot;
+    let candidates = null;
+    for (let level = 0; level < RELAXATIONS; level++) {
+      candidates = pool.filter((id) => pieceAllowed(SHAPES[id], level, rules));
+      if (candidates.length) break;
+    }
+    if (!candidates.length) candidates = pool;
+    const shape = SHAPES[candidates[Math.floor(rng() * candidates.length)]];
+    rules.families.add(shape.family);
+    if (shape.cells.length >= 5) rules.fives += 1;
+    if (shape.cells.length >= 4) rules.bigs += 1;
+    game.tray[slot] = { shapeId: shape.id, colorIndex: Math.floor(rng() * COLORS.length) };
+  }
+  game.draws += TRAY_SIZE;
   return game.tray;
 }
 
@@ -320,7 +544,11 @@ export function canRescue(game) {
  * Re-deals the tray after a dead end, spending one rescue. Returns false if the
  * game is not over or there are none left, so the caller can trust the result.
  * The new pieces come from the seeded RNG like any other deal, which is what
- * keeps a restored game replaying identically.
+ * keeps a restored app replaying identically.
+ *
+ * The player-facing name is "use a refresh". The three chances are the natural
+ * end of a run, which is why they are capped: a game that could go on for ever
+ * has no point to stop at, and that is its own kind of pressure.
  */
 export function rescueTray(game) {
   if (!canRescue(game)) return false;
@@ -412,6 +640,8 @@ export function placePiece(game, slot, originX, originY) {
 
   game.score += result.gained;
   game.moves += 1;
+  game.lines += result.lines;
+  game.sinceClear = result.lines > 0 ? 0 : game.sinceClear + 1;
   if (game.score > game.best) game.best = game.score;
 
   if (game.tray.every((piece) => piece === null)) dealTray(game);
@@ -426,6 +656,8 @@ export function serialize(game) {
     tray: game.tray.map((piece) => (piece ? { ...piece } : null)),
     score: game.score,
     moves: game.moves,
+    lines: game.lines,
+    sinceClear: game.sinceClear,
     best: game.best,
     rescues: game.rescues,
     seed: game.seed,
@@ -461,13 +693,20 @@ export function deserialize(data) {
 
   const safeCount = (value) =>
     Number.isInteger(value) && value >= 0 ? Math.min(value, MAX_RESCUES) : 0;
+  // Absent in saves written before these two existed. Both default to 0, which
+  // is the generous reading: no lines cleared means still in the friendly tier,
+  // and no dry spell means the player is treated as being in a rhythm.
+  const safeCountUpTo = (value, max) =>
+    Number.isInteger(value) && value >= 0 ? Math.min(value, max) : 0;
 
   return {
     version: SAVE_VERSION,
     board,
     tray,
     score: Number.isInteger(data.score) && data.score >= 0 ? data.score : 0,
-    moves: Number.isInteger(data.moves) && data.moves >= 0 ? data.moves : 0,
+    moves: safeCountUpTo(data.moves, 1e6),
+    lines: safeCountUpTo(data.lines, 1e6),
+    sinceClear: safeCountUpTo(data.sinceClear, 1000),
     best: Number.isInteger(data.best) && data.best >= 0 ? data.best : 0,
     // Absent in saves written before rescues existed, which read as none used.
     rescues: safeCount(data.rescues),

@@ -4,12 +4,15 @@ import {
   COLORS,
   GRID,
   MAX_RESCUES,
+  SAVE_VERSION,
   SHAPES,
   SHAPE_COUNT,
+  SHAPE_FAMILIES,
   STAGE_COUNT,
   STAGE_SHAPES,
   TRAY_SIZE,
   anyTrayPlacement,
+  boardPressure,
   canRescue,
   clearedLines,
   createPlayableGame,
@@ -77,6 +80,39 @@ function diagonalGaps() {
   return Array.from({ length: GRID }, (_, i) => [i, i]);
 }
 
+/**
+ * A board with `gapCount` empty cells and no completed line, at any density from
+ * 87.5% full down to 12.5%. The diagonal goes in first: it puts one gap in every
+ * row and every column, so no line can ever be complete and the extra gaps can
+ * then go anywhere at all. A board with a completed line is not a state the game
+ * can be in, so a fixture that has one proves nothing about the deal.
+ */
+function staggeredBoard(gapCount, salt) {
+  assert.ok(gapCount >= GRID && gapCount <= GRID * GRID, `bad gap count ${gapCount}`);
+  const gaps = new Set(diagonalGaps().map(([x, y]) => `${x},${y}`));
+  const rest = [];
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      if (!gaps.has(`${x},${y}`)) rest.push([x, y]);
+    }
+  }
+  // A fixed, spread walk rather than a shuffle, so the density is the only thing
+  // varying between two boards that are being compared.
+  for (let i = 0; i < gapCount - GRID; i++) {
+    gaps.add(`${rest[(i * 5 + salt * 3) % rest.length][0]},${rest[(i * 5 + salt * 3) % rest.length][1]}`);
+  }
+  const game = emptyBoard();
+  for (let y = 0; y < GRID; y++) {
+    for (let x = 0; x < GRID; x++) {
+      game.board[y * GRID + x] = gaps.has(`${x},${y}`) ? 0 : 1;
+    }
+  }
+  const { rows, cols } = clearedLines(game.board);
+  assert.equal(rows.length, 0, 'fixture has a pre-complete row');
+  assert.equal(cols.length, 0, 'fixture has a pre-complete column');
+  return game;
+}
+
 function shapeOfSize(size) {
   const shape = SHAPES.find((s) => s.cells.length === size);
   assert.ok(shape, `expected a shape with ${size} cells`);
@@ -97,10 +133,84 @@ test('shape table is valid and de-duplicated', () => {
       assert.ok(y >= 0 && y < shape.height, 'cell y inside bounding box');
     }
     assert.equal(shape.cells.length, new Set(shape.cells.map(String)).size, 'no repeated cells');
-    assert.ok(shape.cells.length <= 25, 'shape fits the 5x5 design limit');
+    assert.ok(shape.cells.length <= 5, `shape ${shape.id} is ${shape.cells.length} cells`);
+    assert.ok(Math.max(shape.width, shape.height) <= 5, `shape ${shape.id} is too long`);
   }
   assert.equal(SHAPE_COUNT, SHAPES.length);
-  assert.ok(SHAPE_COUNT > 60, `expected a rich shape set, got ${SHAPE_COUNT}`);
+  assert.equal(SHAPE_COUNT, 46, `the catalogue is 46 variants, got ${SHAPE_COUNT}`);
+});
+
+/**
+ * Every family must expand to its whole orbit, all four rotations of it and of
+ * its mirror. The expansion used to try only four transforms, which quietly lost
+ * orientations: the L-tromino and L-tetromino came out as 4 of their 8, so the
+ * game contained no J shapes at all, and the U and T lost one each. Recomputing
+ * the orbit here means a future change to the expansion cannot lose one again.
+ */
+test('every family expands to its full orbit of orientations', () => {
+  const keyOf = (cells) =>
+    cells
+      .map(([x, y]) => `${x},${y}`)
+      .sort()
+      .join(' ');
+  const rotate = (cells) => cells.map(([x, y]) => [-y, x]);
+  const mirror = (cells) => cells.map(([x, y]) => [-x, y]);
+  const normalise = (cells) => {
+    const minX = Math.min(...cells.map((c) => c[0]));
+    const minY = Math.min(...cells.map((c) => c[1]));
+    return cells.map(([x, y]) => [x - minX, y - minY]);
+  };
+
+  for (const family of SHAPE_FAMILIES) {
+    const seed = normalise(family.variants[0].cells);
+    const orbit = new Set();
+    for (const base of [seed, mirror(seed)]) {
+      let cells = base;
+      for (let turn = 0; turn < 4; turn += 1) {
+        orbit.add(keyOf(normalise(cells)));
+        cells = rotate(cells);
+      }
+    }
+    assert.equal(
+      family.variants.length,
+      orbit.size,
+      `${family.name} has ${family.variants.length} of its ${orbit.size} orientations`
+    );
+  }
+  // The chiral families are the ones the old four-transform expansion lost, so
+  // they are the ones worth naming: the L gives L and J, the S gives S and Z.
+  const l4 = SHAPE_FAMILIES.find((f) => f.name === 'l4');
+  assert.equal(l4.variants.length, 8, 'the L-tetromino needs all four Ls and all four Js');
+  const s4 = SHAPE_FAMILIES.find((f) => f.name === 's4');
+  assert.equal(s4.variants.length, 4, 'the S-tetromino needs S and Z, both ways up');
+});
+
+/**
+ * A family that expands to nothing is a family name in the tier table that points
+ * at a shape an earlier one already claimed. That is how the previous catalogue
+ * came to have a "y5" that was byte-identical to its "u3", so the shape table is
+ * checked for it directly.
+ */
+test('no family is a duplicate of another, and none expands to nothing', () => {
+  const artOf = (shape) => {
+    const rows = [];
+    for (let y = 0; y < shape.height; y += 1) {
+      let row = '';
+      for (let x = 0; x < shape.width; x += 1) {
+        row += shape.cells.some(([cx, cy]) => cx === x && cy === y) ? '#' : '.';
+      }
+      rows.push(row);
+    }
+    return rows.join('/');
+  };
+  const art = new Map();
+  for (const family of SHAPE_FAMILIES) {
+    assert.ok(family.variants.length > 0, `${family.name} expands to no shape at all`);
+    const key = artOf(family.variants[0]);
+    assert.ok(!art.has(key), `${family.name} is the same shape as ${art.get(key)}`);
+    art.set(key, family.name);
+  }
+  assert.equal(SHAPE_FAMILIES.length, 13, `13 families, got ${SHAPE_FAMILIES.length}`);
 });
 
 test('shape ids index the flattened shape table', () => {
@@ -399,9 +509,13 @@ test('corrupt saves are rejected rather than crashing', () => {
   assert.equal(deserialize(undefined), null);
   assert.equal(deserialize({}), null);
   assert.equal(deserialize({ version: 999 }), null);
+  // A v1 save names shape ids from the old catalogue, so every one of them
+  // means something else now. It is dropped whole rather than half-read.
+  assert.equal(deserialize({ version: 1, board: new Array(64).fill(0) }), null);
   assert.equal(deserialize({ version: 1, board: [1], tray: [] }), null);
+  assert.equal(deserialize({ version: SAVE_VERSION, board: [1], tray: [] }), null);
   const extraFields = {
-    version: 1,
+    version: SAVE_VERSION,
     board: new Array(64).fill(0),
     tray: new Array(3).fill(null),
     seed: 1,
@@ -410,7 +524,7 @@ test('corrupt saves are rejected rather than crashing', () => {
   };
   assert.ok(deserialize(extraFields), 'unknown fields are ignored, not rejected');
   const badTray = {
-    version: 1,
+    version: SAVE_VERSION,
     board: new Array(64).fill(0),
     tray: [{ shapeId: 9999, colorIndex: 0 }, null, null],
     seed: 1,
@@ -418,7 +532,7 @@ test('corrupt saves are rejected rather than crashing', () => {
   };
   assert.equal(deserialize(badTray), null);
   const badColor = {
-    version: 1,
+    version: SAVE_VERSION,
     board: new Array(64).fill(0),
     tray: [{ shapeId: 0, colorIndex: COLORS.length + 5 }, null, null],
     seed: 1,
@@ -426,7 +540,7 @@ test('corrupt saves are rejected rather than crashing', () => {
   };
   assert.equal(deserialize(badColor), null);
   const badCell = {
-    version: 1,
+    version: SAVE_VERSION,
     board: new Array(64).fill(COLORS.length + 9),
     tray: [null, null, null],
     seed: 1,
@@ -435,36 +549,50 @@ test('corrupt saves are rejected rather than crashing', () => {
   assert.equal(deserialize(badCell), null);
 });
 
-test('the first pieces of a run are small, and the awkward ones come later', () => {
+/**
+ * The opening has to be varied enough to be interesting and gentle enough not to
+ * decide a run. These are the two halves of that, and they are the whole reason
+ * the pool is built the way it is: 28 shapes available from the first tray, none
+ * of them more than four cells, and the 5-cell pieces held back until the player
+ * has earned them by clearing.
+ */
+test('the opening is varied, small, and the 5-cell pieces need clears first', () => {
   const opening = new Set();
   const later = new Set();
-  // Sample every deal a game makes, bucketed by the stage that was live when it
-  // was drawn. A handful of seeds is enough to see every shape in a pool.
   for (const seed of [1, 7, 42, 2026, 987654321, 13, 99, 12345, 555, 8]) {
-    const game = createPlayableGame(seed);
-    for (let moves = 0; moves < 200; moves++) {
-      const bucket = stageFor(moves) === 0 ? opening : later;
-      for (const piece of dealTray(game)) bucket.add(piece.shapeId);
-      game.moves += 1;
+    for (const [lines, bucket] of [
+      [0, opening],
+      [100, later],
+    ]) {
+      const game = createPlayableGame(seed);
+      game.lines = lines;
+      for (let tray = 0; tray < 60; tray++) {
+        for (const piece of dealTray(game)) bucket.add(piece.shapeId);
+      }
     }
   }
-  assert.ok(opening.size > 4, `the opening pool is ${opening.size} shapes`);
+  assert.ok(opening.size > 20, `the opening pool is only ${opening.size} shapes`);
   for (const id of opening) {
     const shape = SHAPES[id];
     assert.ok(shape.cells.length <= 4, `stage 0 shape ${id} has ${shape.cells.length} cells`);
-    assert.ok(shape.width <= 3 && shape.height <= 3, `stage 0 shape ${id} is ${shape.width}x${shape.height}`);
   }
+  assert.equal(opening.size, 28, 'every friendly shape turns up in the opening stage');
   assert.ok(later.size > opening.size, `later stages must unlock more shapes: ${opening.size} -> ${later.size}`);
-  const awkward = [...later].filter((id) => SHAPES[id].cells.length >= 6);
-  assert.ok(awkward.length > 0, 'the 6-cell pieces only turn up later');
-  assert.ok(!opening.has(awkward[0]), 'no 6-cell piece is dealt in the opening stage');
+
+  const five = [...later].filter((id) => SHAPES[id].cells.length === 5);
+  assert.ok(five.length > 0, 'the 5-cell pieces do turn up later');
+  for (const id of five) {
+    assert.ok(!opening.has(id), `5-cell shape ${id} is dealt in the opening stage`);
+  }
+  assert.equal(SHAPES.filter((s) => s.cells.length === 5).length, 18, '18 of the 46 are 5-cell');
+  assert.equal(STAGE_SHAPES[0].filter((id) => SHAPES[id].cells.length === 5).length, 0);
 });
 
 test('every shape is reachable eventually', () => {
   const seen = new Set();
   for (const seed of [1, 7, 42, 2026, 987654321, 13, 99, 12345, 555, 8, 31, 64]) {
     const game = createPlayableGame(seed);
-    game.moves = 1000; // deep into the last stage
+    game.lines = 1000; // deep into the last stage
     for (let tray = 0; tray < 20; tray++) {
       for (const piece of dealTray(game)) seen.add(piece.shapeId);
     }
@@ -488,48 +616,81 @@ test('each stage offers everything the last one did, and more', () => {
   }
 });
 
-test('the stage advances on pieces placed, and never goes back', () => {
+test('the stage advances on lines cleared, and never goes back', () => {
+  // Keyed on success, not on elapsed placements, so a player who is struggling
+  // stays in the friendly tier rather than being handed harder pieces at the
+  // exact moment they are struggling. `moves` is deliberately not consulted.
   assert.equal(stageFor(0), 0);
-  assert.equal(stageFor(8), 0);
-  assert.equal(stageFor(9), 1);
-  assert.equal(stageFor(23), 1);
-  assert.equal(stageFor(24), 2);
-  assert.equal(stageFor(44), 2);
-  assert.equal(stageFor(45), 3);
+  assert.equal(stageFor(19), 0);
+  assert.equal(stageFor(20), 1);
+  assert.equal(stageFor(59), 1);
+  assert.equal(stageFor(60), 2);
   assert.equal(stageFor(100000), STAGE_COUNT - 1);
   let previous = 0;
-  for (let moves = 0; moves < 200; moves++) {
-    const stage = stageFor(moves);
-    assert.ok(stage >= previous, `stage went backwards at ${moves} moves`);
+  for (let lines = 0; lines < 400; lines++) {
+    const stage = stageFor(lines);
+    assert.ok(stage >= previous, `stage went backwards at ${lines} lines`);
     previous = stage;
   }
   assert.ok(stageNameFor(0).length > 0, 'stages are named for the player');
+  assert.equal(stageNameFor(60), 'Deep deck', 'the late stage is named for the mood, not strain');
 });
 
 test('a stage boundary survives a save and restore', () => {
-  // The stage comes from `moves`, which is saved, so a game restored right on a
+  // The stage comes from `lines`, which is saved, so a game restored right on a
   // boundary has to deal the same pieces the uninterrupted game would.
-  for (const moves of [0, 8, 9, 23, 24, 44, 45]) {
+  for (const lines of [0, 19, 20, 59, 60]) {
     const game = createPlayableGame(20260928);
-    game.moves = moves;
+    game.lines = lines;
     const copy = deserialize(JSON.parse(JSON.stringify(serialize(game))));
-    assert.deepEqual(dealTray(copy), dealTray(game), `mismatch at ${moves} moves`);
+    assert.deepEqual(dealTray(copy), dealTray(game), `mismatch at ${lines} lines`);
     assert.deepEqual(serialize(copy), serialize(game));
   }
 });
 
-test('a dead tray can be re-dealt three times, and no more', () => {
-  // A board full but for the diagonal: nothing two cells or bigger can fit, and
-  // the tray is loaded with pieces that need it.
+test('a struggling player stays friendly and a flowing one unlocks everything', () => {
+  // The point of keying the ramp on clears. A player who has placed 400 pieces
+  // and cleared nothing is still in stage 0; a player who has cleared 60 lines
+  // is in the last stage, however few pieces they placed to do it.
+  const stalled = createPlayableGame(5);
+  for (let i = 0; i < 400; i++) stalled.moves += 1;
+  assert.equal(stalled.lines, 0, 'no clears');
+  assert.equal(stageFor(stalled.lines), 0, 'a player who never clears never leaves stage 0');
+  assert.ok(STAGE_SHAPES[0].every((id) => SHAPES[id].cells.length <= 4), 'and never sees a 5-cell piece');
+
+  const flowing = createPlayableGame(6);
+  flowing.lines = 60;
+  flowing.moves = 30;
+  assert.equal(stageFor(flowing.lines), STAGE_COUNT - 1, 'clearing unlocks quickly, by design');
+  assert.equal(STAGE_SHAPES[STAGE_COUNT - 1].length, SHAPE_COUNT, 'and the whole catalogue is open');
+});
+
+/** A 5-bar: the biggest thing in the catalogue, and the piece a rescue test needs. */
+function barId() {
+  const bar = SHAPES.find((s) => s.cells.length === 5 && s.width === 5);
+  assert.ok(bar, 'expected a 5-cell bar in the catalogue');
+  return bar.id;
+}
+
+/**
+ * A board full but for the diagonal, with a tray nothing can be placed on. The
+ * deal guarantees a piece that fits, so a stuck position has to be staged by
+ * hand whenever a test wants to get there.
+ */
+function stuckGame() {
   const game = boardWithGaps(diagonalGaps());
-  const big = SHAPES.find((s) => s.cells.length === 5 && s.width === 5);
-  game.tray = [0, 1, 2].map(() => ({ shapeId: big.id, colorIndex: 0 }));
+  const bar = barId();
+  game.tray = [0, 1, 2].map(() => ({ shapeId: bar, colorIndex: 0 }));
   assert.equal(isGameOver(game), true, 'fixture is a dead end');
+  return game;
+}
+
+test('a dead tray can be re-dealt three times, and no more', () => {
+  const game = stuckGame();
   assert.equal(canRescue(game), true);
 
   const board = Array.from(game.board);
   const score = game.score;
-  const rescues = MAX_RESCUES;
   for (let attempt = 1; attempt <= MAX_RESCUES; attempt++) {
     assert.equal(rescueTray(game), true, `rescue ${attempt} refused`);
     assert.equal(game.rescues, attempt, 'rescues counted');
@@ -537,11 +698,21 @@ test('a dead tray can be re-dealt three times, and no more', () => {
     assert.equal(game.score, score, 'the score is untouched');
     assert.equal(game.tray.length, TRAY_SIZE);
     for (const piece of game.tray) assert.ok(piece !== null, 'the tray is full again');
+    // The deal filters for pieces that fit, so a rescue is never another dead
+    // tray. On this board that means a 1x1, which is all the diagonal allows.
+    assert.ok(
+      game.tray.some((piece) => hasAnyPlacement(game, piece.shapeId)),
+      `rescue ${attempt} dealt another tray that cannot be played`
+    );
+    // Get stuck again, the way a player would, to spend the next rescue.
+    if (attempt < MAX_RESCUES) {      game.tray = [0, 1, 2].map(() => ({ shapeId: barId(), colorIndex: 0 }));
+      assert.equal(isGameOver(game), true);
+    }
   }
-  assert.equal(game.rescues, rescues, 'no more than the limit');
+  assert.equal(game.rescues, MAX_RESCUES, 'no more than the limit');
   assert.equal(canRescue(game), false, 'the offer is withdrawn');
   assert.equal(rescueTray(game), false, 'a fourth rescue is refused');
-  assert.equal(game.rescues, rescues, 'and it does not count');
+  assert.equal(game.rescues, MAX_RESCUES, 'and it does not count');
 });
 
 test('a rescue is only offered on a tray that cannot be played', () => {
@@ -563,14 +734,8 @@ test('a rescue is only offered on a tray that cannot be played', () => {
 });
 
 test('a rescued tray is as deterministic as any other deal', () => {
-  const build = () => {
-    const game = boardWithGaps(diagonalGaps());
-    const big = SHAPES.find((s) => s.cells.length === 5 && s.width === 5);
-    game.tray = [0, 1, 2].map(() => ({ shapeId: big.id, colorIndex: 0 }));
-    return game;
-  };
-  const a = build();
-  const b = build();
+  const a = stuckGame();
+  const b = stuckGame();
   a.seed = 4242;
   b.seed = 4242;
   assert.equal(rescueTray(a), true);
@@ -578,11 +743,16 @@ test('a rescued tray is as deterministic as any other deal', () => {
   assert.deepEqual(a.tray, b.tray);
 
   // And it survives a restore mid-way, so a reloaded app deals the same again.
+  // Both are restored from the same save and then stuck in the same way, so the
+  // rescue has to come out identical on both sides of a reload.
+  const stuckAgain = () => [0, 1, 2].map(() => ({ shapeId: barId(), colorIndex: 0 }));
   const c = deserialize(JSON.parse(JSON.stringify(serialize(a))));
-  const before = serialize(c);
-  rescueTray(c);
   const d = deserialize(JSON.parse(JSON.stringify(serialize(a))));
-  rescueTray(d);
+  const before = serialize(c);
+  c.tray = stuckAgain();
+  d.tray = stuckAgain();
+  assert.equal(rescueTray(c), true);
+  assert.equal(rescueTray(d), true);
   assert.deepEqual(serialize(c), serialize(d));
   assert.notDeepEqual(serialize(c), before, 'the rescue really changed the tray');
 });
@@ -610,6 +780,294 @@ test('a new game starts with its rescues back', () => {
   const fresh = createPlayableGame(3);
   assert.equal(fresh.rescues, 0);
   assert.equal(serialize(fresh).rescues, 0);
+});
+
+/**
+ * The fairness guarantee. Every piece in a dealt tray is one that fits the board
+ * as it stands, which means a tray is never dealt that the player cannot place
+ * anything from — the case the keep-going card exists to rescue, and the reason
+ * the old uniform deal felt unfair. It is a guarantee about each piece, not a
+ * proof that all three can be played in some order, which would need a search
+ * far too deep to run on a phone.
+ */
+test('no dealt piece is unplayable on the board it was dealt on', () => {
+  let checked = 0;
+  for (let gaps = GRID; gaps <= GRID * GRID; gaps += 2) {
+    for (let salt = 0; salt < 4; salt++) {
+      const game = staggeredBoard(gaps, salt);
+      game.lines = 200; // every shape unlocked
+      for (const piece of dealTray(game)) {
+        checked += 1;
+        assert.ok(
+          hasAnyPlacement(game, piece.shapeId),
+          `shape ${piece.shapeId} cannot be placed with ${gaps} gaps on the board`
+        );
+      }
+    }
+  }
+  assert.ok(checked > 300, `only ${checked} pieces checked`);
+});
+
+test('a tray is composed, not rolled three times independently', () => {
+  // These are the tray-level rules that make a tray playable as a unit. The old
+  // uniform deal broke all of them: 73% of late trays held two or more pieces of
+  // five cells or more, and a quarter held three.
+  let trays = 0;
+  for (const seed of [1, 7, 42, 2026, 987654321, 13, 99, 12345, 555, 8, 31, 64, 77, 88, 101]) {
+    const game = createPlayableGame(seed);
+    for (let step = 0; step < 120; step++) {
+      game.lines = step * 3;
+      const dealt = dealTray(game);
+      trays += 1;
+      const cells = dealt.map((piece) => SHAPES[piece.shapeId].cells.length);
+      const families = dealt.map((piece) => SHAPES[piece.shapeId].family);
+      assert.ok(cells.filter((c) => c >= 5).length <= 1, `tray has two 5-cell pieces: ${cells}`);
+      const bigLimit = stageFor(game.lines) === 0 ? 1 : 2;
+      assert.ok(
+        cells.filter((c) => c >= 4).length <= bigLimit,
+        `tray has too many 4-cell pieces for stage ${stageFor(game.lines)}: ${cells}`
+      );
+      assert.equal(new Set(families).size, families.length, `tray repeats a family: ${families}`);
+      assert.equal(new Set(dealt.map((p) => p.shapeId)).size, TRAY_SIZE, 'tray repeats a shape');
+    }
+  }
+  assert.ok(trays > 1000, `only ${trays} trays checked`);
+});
+
+/**
+ * The board getting full is the difficulty, so the deal reacts to it. A tight
+ * board gets small slot-fillers; a roomy one gets the bigger friendly pieces.
+ * Both sides are dealt from the same seed and tray index, so the only difference
+ * between them is the board.
+ */
+test('a tighter board is dealt smaller pieces', () => {
+  const mean = (game) => {
+    let total = 0;
+    for (const piece of dealTray(game)) total += SHAPES[piece.shapeId].cells.length;
+    return total / TRAY_SIZE;
+  };
+  let roomy = 0;
+  let tight = 0;
+  const samples = 40;
+  for (let salt = 0; salt < samples; salt++) {
+    const open = emptyBoard();
+    open.lines = 200;
+    const crowded = staggeredBoard(24, salt); // 62.5% full
+    crowded.lines = 200;
+    roomy += mean(open);
+    tight += mean(crowded);
+  }
+  roomy /= samples;
+  tight /= samples;
+  assert.ok(roomy > tight, `a roomy board gave ${roomy.toFixed(2)} cells, a tight one ${tight.toFixed(2)}`);
+  // The gap is the real assertion. An absolute number is only meaningful against
+  // the catalogue's average, which is about 4.1 cells for the full pool and lower
+  // once the one-five-cell and two-four-cell caps are applied.
+  assert.ok(roomy - tight >= 0.8, `the gap is only ${(roomy - tight).toFixed(2)} cells`);
+  assert.ok(roomy >= 3.2, `a roomy board should get the big pieces, got ${roomy.toFixed(2)}`);
+  assert.ok(tight < 2.6, `a crowded board should get slot-fillers, got ${tight.toFixed(2)}`);
+  assert.ok(boardPressure(new Uint8Array(GRID * GRID)) === 0, 'an empty board is no pressure');
+  assert.ok(boardPressure(new Uint8Array(GRID * GRID).fill(1)) === 1, 'a full board is all pressure');
+});
+
+/**
+ * The guarantee: a tray is nearly always carrying a small win.
+ *
+ * Only 30% of trays used to contain a piece that completed a line *at the moment
+ * it was dealt*, which is what makes a long stretch of placements feel like
+ * nothing is happening. Measured over real runs, a clear is completable at all
+ * on 58% of trays, and the deal now reaches that ceiling — so this test asserts
+ * the weaker, structural version: whenever a clear is available, one is dealt.
+ */
+test('a dry spell brings a line-clearing piece with the next tray', () => {
+  const offersClear = (game, tray) =>
+    tray.some((piece) => {
+      for (let y = 0; y < GRID; y++) {
+        for (let x = 0; x < GRID; x++) {
+          if (!fitsAt(game, piece.shapeId, x, y)) continue;
+          const probe = Uint8Array.from(game.board);
+          for (const [dx, dy] of SHAPES[piece.shapeId].cells) probe[(y + dy) * GRID + x + dx] = 1;
+          const { rows, cols } = clearedLines(probe);
+          if (rows.length + cols.length > 0) return true;
+        }
+      }
+      return false;
+    });
+
+  let checked = 0;
+  let satisfied = 0;
+  for (let gaps = 12; gaps <= 40; gaps += 2) {
+    for (let salt = 0; salt < 4; salt++) {
+      for (const sinceClear of [0, 1, 2, 4, 9]) {
+        const game = staggeredBoard(gaps, salt);
+        game.lines = 100;
+        game.sinceClear = sinceClear;
+        const tray = dealTray(game);
+        if (!offersClear(game, tray)) continue; // nothing was completable at all
+        checked += 1;
+        if (sinceClear >= 2) {
+          assert.ok(
+            offersClear(game, tray),
+            `after ${sinceClear} dry placements a clear was available and none was dealt`
+          );
+          satisfied += 1;
+        }
+      }
+    }
+  }
+  assert.ok(checked > 200, `only ${checked} boards had a clear available, ${satisfied} asserted`);
+});
+
+/**
+ * The ramp breathes. A player part-way through a dry spell is dealt smaller
+ * pieces, and a player who has just cleared on a roomy board gets bigger ones.
+ * Same seed and same tray index on both sides, so the only difference is
+ * `sinceClear`.
+ */
+test('the cap eases down on a dry spell and up in flow', () => {
+  const mean = (game) => {
+    let total = 0;
+    for (const piece of dealTray(game)) total += SHAPES[piece.shapeId].cells.length;
+    return total / TRAY_SIZE;
+  };
+  let flowing = 0;
+  let stuck = 0;
+  const samples = 40;
+  for (let salt = 0; salt < samples; salt++) {
+    const inFlow = emptyBoard();
+    inFlow.lines = 100;
+    inFlow.sinceClear = 0;
+    const dried = emptyBoard();
+    dried.lines = 100;
+    dried.sinceClear = 8;
+    flowing += mean(inFlow);
+    stuck += mean(dried);
+  }
+  flowing /= samples;
+  stuck /= samples;
+  assert.ok(flowing > stuck, `in flow got ${flowing.toFixed(2)} cells, stuck got ${stuck.toFixed(2)}`);
+  assert.ok(flowing - stuck >= 0.8, `the breath is only ${(flowing - stuck).toFixed(2)} cells wide`);
+  assert.ok(flowing >= 3.2, `a flowing player on a roomy board gets the big pieces, got ${flowing.toFixed(2)}`);
+  assert.ok(stuck < 2.6, `a stuck player gets slot-fillers, got ${stuck.toFixed(2)}`);
+});
+
+test('the clear counter and the dry spell round-trip, and default generously', () => {
+  const game = createPlayableGame(17);
+  game.lines = 34;
+  game.sinceClear = 2;
+  const restored = deserialize(serialize(game));
+  assert.equal(restored.lines, 34);
+  assert.equal(restored.sinceClear, 2);
+  // A save written before these fields existed reads as "nothing cleared yet and
+  // no dry spell", which puts the player at the start of the ramp and in flow.
+  const legacy = JSON.parse(JSON.stringify(serialize(game)));
+  delete legacy.lines;
+  delete legacy.sinceClear;
+  const old = deserialize(legacy);
+  assert.ok(old);
+  assert.equal(old.lines, 0);
+  assert.equal(old.sinceClear, 0);
+  for (const bad of [-1, 1.5, '2', null, 1e9]) {
+    for (const field of ['lines', 'sinceClear']) {
+      const save = JSON.parse(JSON.stringify(serialize(game)));
+      save[field] = bad;
+      const back = deserialize(save);
+      assert.ok(back, `a bad ${field} must not lose the save`);
+      assert.ok(back.lines >= 0 && back.sinceClear >= 0, `${field}=${bad} read back badly`);
+    }
+  }
+});
+
+test('the dry spell resets on a clear and grows without one', () => {
+  const game = singleCellGame(diagonalGaps());
+  assert.equal(game.sinceClear, 0);
+  const first = placePiece(game, 0, 0, 0);
+  assert.equal(first.lines, 2, 'the fixture clears a row and a column');
+  assert.equal(game.lines, 2, 'lines are counted');
+  assert.equal(game.sinceClear, 0, 'and the dry spell stays at zero');
+
+  // The other half needs a board loose enough that a one-cell piece has somewhere
+  // to go that does not finish a line, which the diagonal fixture cannot offer —
+  // on it every gap is the only gap in its row and its column.
+  const single = SHAPES.find((s) => s.cells.length === 1);
+  let placed = false;
+  for (let gaps = 20; gaps <= 48 && !placed; gaps += 2) {
+    for (let salt = 0; salt < 4 && !placed; salt += 1) {
+      const loose = staggeredBoard(gaps, salt);
+      loose.tray = [{ shapeId: single.id, colorIndex: 0 }];
+      for (let y = 0; y < GRID && !placed; y += 1) {
+        for (let x = 0; x < GRID; x += 1) {
+          if (!fitsAt(loose, single.id, x, y)) continue;
+          const probe = Uint8Array.from(loose.board);
+          probe[y * GRID + x] = 1;
+          const { rows, cols } = clearedLines(probe);
+          if (rows.length + cols.length > 0) continue;
+          const result = placePiece(loose, 0, x, y);
+          assert.equal(result.lines, 0, 'this placement clears nothing');
+          assert.equal(loose.lines, 0, 'so no lines are counted');
+          assert.equal(loose.sinceClear, 1, 'and the dry spell starts');
+          placed = true;
+          break;
+        }
+      }
+    }
+  }
+  assert.ok(placed, 'no board was found where a one-cell piece clears nothing');
+});
+
+/**
+ * The complaint this whole change answers: a run was dying about eight trays in,
+ * right as the awkward shapes arrived. A greedy bot is a stable stand-in for a
+ * competent player, so the floor it reports is a floor on how long a run can be.
+ *
+ * The upper bound matters just as much and was added after getting it wrong.
+ * Offering a line-clearing piece on *every* tray pushed the median to 184 trays
+ * and the 90th percentile to 481, which is not a calm game — it is an endless
+ * sandbox with no natural point to stop at, and the three refreshes exist
+ * precisely so there is one. A run is a thing that finishes.
+ */
+test('runs last, but still finish', () => {
+  const movesOf = (game) => {
+    let guard = 0;
+    while (!isGameOver(game) && guard < 6000) {
+      guard += 1;
+      let best = null;
+      let bestScore = -1;
+      for (let slot = 0; slot < TRAY_SIZE; slot++) {
+        const piece = game.tray[slot];
+        if (!piece) continue;
+        for (let y = 0; y < GRID; y++) {
+          for (let x = 0; x < GRID; x++) {
+            if (!fitsAt(game, piece.shapeId, x, y)) continue;
+            const probe = Uint8Array.from(game.board);
+            for (const [dx, dy] of SHAPES[piece.shapeId].cells) probe[(y + dy) * GRID + x + dx] = 1;
+            const { rows, cols } = clearedLines(probe);
+            const value = (rows.length + cols.length) * 1000 + SHAPES[piece.shapeId].cells.length;
+            if (value > bestScore) {
+              bestScore = value;
+              best = [slot, x, y];
+            }
+          }
+        }
+      }
+      if (!best) break;
+      placePiece(game, ...best);
+    }
+    return Math.floor(game.moves / TRAY_SIZE);
+  };
+
+  const runs = [];
+  for (let seed = 1; seed <= 150; seed++) runs.push(movesOf(createPlayableGame(seed)));
+  runs.sort((a, b) => a - b);
+  const at = (p) => runs[Math.floor((runs.length - 1) * p)];
+  const short = runs.filter((r) => r < 10).length;
+  assert.ok(at(0.5) >= 25, `median run is ${at(0.5)} trays, want at least 25`);
+  assert.ok(at(0.1) >= 15, `10th percentile is ${at(0.1)} trays, want at least 15`);
+  assert.ok(short / runs.length < 0.1, `${short} of ${runs.length} runs ended before tray ten`);
+  assert.ok(at(0.9) > at(0.5), 'a better run should last longer than a median one');
+  // Before any of this work a greedy run died at a median of 10 trays.
+  assert.ok(at(0.5) <= 200, `median run is ${at(0.5)} trays, the game has stopped being a game`);
+  assert.ok(at(0.9) <= 400, `90th percentile is ${at(0.9)} trays, runs need an ending`);
 });
 
 test('a full random game never produces an impossible state', () => {

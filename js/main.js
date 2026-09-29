@@ -29,6 +29,7 @@ const dom = {
   themeToggle: document.getElementById('theme-toggle'),
   themeGlyph: document.getElementById('theme-glyph'),
   overlay: document.getElementById('overlay'),
+  overlayTitle: document.getElementById('overlay-title'),
   overlayScore: document.getElementById('overlay-score'),
   overlayNote: document.getElementById('overlay-note'),
   keepGoing: document.getElementById('keep-going'),
@@ -95,24 +96,39 @@ function paintHud(bump) {
 }
 
 /**
- * Renders the end-of-run card. The "keep going" offer is decided by the model,
- * not here, so the rule that a rescue is only available on a dead tray lives in
- * one place.
+ * Renders the end-of-run card. The "use a refresh" offer is decided by the
+ * model, not here, so the rule that a refresh is only available on a dead tray
+ * lives in one place.
+ *
+ * There are two states and the copy differs between them, because there are two
+ * different situations. While refreshes remain the run is not over, so the card
+ * offers a choice and neither button reads as giving up. Once the last one is
+ * spent the run really has ended, and that is a soft stop rather than a defeat —
+ * the three chances exist precisely so there is a natural point to finish at.
+ * "Game over" appears in neither: it was baked into the markup unconditionally,
+ * so it was on screen even when three refreshes were still available.
  */
 function showOverlay() {
-  dom.overlayScore.textContent = game.score.toLocaleString();
   const left = MAX_RESCUES - game.rescues;
+  const canRefresh = canRescue(game);
+  dom.overlayTitle.textContent = canRefresh ? 'Out of room' : 'Run complete';
+  dom.overlayScore.textContent = game.score.toLocaleString();
   dom.overlayNote.textContent =
     game.best === game.score ? 'New personal best' : `Best ${game.best.toLocaleString()}`;
-  dom.keepGoing.hidden = !canRescue(game);
-  if (!dom.keepGoing.hidden) {
-    dom.keepGoing.textContent = left === 1 ? 'Keep going · 1 left' : `Keep going · ${left} left`;
+  dom.keepGoing.hidden = !canRefresh;
+  if (canRefresh) {
+    dom.keepGoing.textContent =
+      left === 1 ? 'Use a refresh · 1 left' : `Use a refresh · ${left} left`;
   }
   dom.overlay.hidden = false;
 }
 
 function hideOverlay() {
   dom.overlay.hidden = true;
+  // The button's own state is reset with the card. showOverlay() is the only
+  // other thing that sets it, and a rescue can deal a tray that *is* playable,
+  // which takes the card down without ever going through showOverlay() again.
+  dom.keepGoing.hidden = true;
 }
 
 function newGame() {
@@ -142,7 +158,7 @@ function keepGoing() {
 }
 
 function onPlace(slot, originX, originY) {
-  const stage = stageFor(game.moves);
+  const stage = stageFor(game.lines);
   const result = placePiece(game, slot, originX, originY);
   if (!result) return;
 
@@ -166,9 +182,10 @@ function onPlace(slot, originX, originY) {
 
   // The tray has just been re-dealt, so this is the moment the new stage
   // actually turns up. It is the only place the ramp is mentioned: a run should
-  // not feel like it is being levelled up.
-  if (stageFor(game.moves) !== stage) {
-    renderer.showToast(`New shapes · ${stageNameFor(game.moves)}`);
+  // not feel like it is being levelled up, and the stage only ever unlocks
+  // because the player has been clearing lines.
+  if (stageFor(game.lines) !== stage) {
+    renderer.showToast(`New shapes · ${stageNameFor(game.lines)}`);
   }
 
   const finish = () => {
